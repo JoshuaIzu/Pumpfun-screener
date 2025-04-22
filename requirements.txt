@@ -1,18 +1,13 @@
+# Core
 streamlit==1.32.0
 pandas==2.1.4
 numpy==1.26.0
 websockets==12.0
-python-dotenv==1.0.0
 
-# Solana Blockchain
-solders==0.16.1
-solana==0.30.0
+# Solana (CRITICAL VERSIONS)
+solders==0.18.0  # Must be ≥0.18.0 for Solana v0.30+
+solana==0.30.0   # Latest stable
 
-# Data Visualization
-plotly==5.18.0
-altair==5.2.0
-matplotlib==3.8.2
-
-# Web/API
+# Web
 requests==2.31.0
-aiohttp==3.9.1
+aiohttp==3.9.1   # Required by solana-py
