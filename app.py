@@ -199,6 +199,7 @@ with tab1:
     if st.session_state.tracked_token:
         st.header(f"Token: {st.session_state.tracked_token[:6]}...{st.session_state.tracked_token[-4:]}")
         
+        # Create columns first
         col1, col2 = st.columns(2)
         
         with col1:
@@ -210,49 +211,45 @@ with tab1:
                 st.info("No trades recorded yet")
         
         with col2:
-            st.subheader("Token Holders")
+            st.subheader("Token Holders (Helius API)")
             try:
                 holders = run_async(get_token_holders(st.session_state.tracked_token))
                 st.metric("Total Holders", len(holders))
                 
                 if holders:
-                    df_holders = pd.DataFrame(holders[:10])
-                    df_holders['Formatted Amount'] = df_holders['ui_amount'].apply(
-                        lambda x: f"{x:,.2f}" if x >= 1 else f"{x:,.6f}"
-                    )
+                    df_holders = pd.DataFrame(holders[:15])
                     df_holders['Wallet'] = df_holders['address'].apply(
-                        lambda x: f"{x[:4]}...{x[-4:]}"
+                        lambda x: f"{x[:6]}...{x[-4:]}" if len(x) > 10 else x
+                    )
+                    df_holders['Balance'] = df_holders['ui_amount'].apply(
+                        lambda x: f"{x:,.2f}" if x >= 1 else f"{x:.6f}".rstrip('0').rstrip('.') if '.' in f"{x:.6f}" else f"{x:,.0f}"
                     )
                     
                     st.dataframe(
-                        df_holders[['Wallet', 'Formatted Amount']],
+                        df_holders[['Wallet', 'Balance']],
                         column_config={
                             "Wallet": st.column_config.TextColumn("Wallet", width="medium"),
-                            "Formatted Amount": st.column_config.NumberColumn(
-                                "Token Balance", 
-                                format="%.6f",
-                                width="medium"
-                            )
+                            "Balance": st.column_config.TextColumn("Token Balance")
                         },
                         hide_index=True,
-                        use_container_width=True
-                    )
+                        use_container_width=True,
+                        height=min(400, 35 * len(df_holders) + 40)
+                    
+                    csv = df_holders[['address', 'amount']].rename(
+                        columns={'address': 'Wallet', 'amount': 'RawAmount'}
+                    ).to_csv(index=False)
                     
                     st.download_button(
-                        label="Download All Holders",
-                        data=df_holders.to_csv(index=False).encode('utf-8'),
-                        file_name=f"{st.session_state.tracked_token[:5]}_holders.csv",
-                        mime='text/csv'
-                    )
+                        label="Download Full Holder Data",
+                        data=csv,
+                        file_name=f"{st.session_state.tracked_token[:10]}_holders.csv",
+                        mime='text/csv')
                 else:
-                    st.warning("No holders found. This may be a new token.")
+                    st.warning("No holders found or API limit reached")
                     
             except Exception as e:
-                st.error(f"Error fetching holders: {str(e)}")
-                st.error("Please ensure:")
-                st.error("1. You're using a valid Pump.fun token address")
-                st.error("2. The token has existing holders")
-                st.error(f"Technical details: {e}")
+                st.error(f"Error: {str(e)}")
+                st.info("Note: You need a valid Helius API key for this functionality")
 
 # Wallet Activity Tab
 with tab2:
@@ -321,7 +318,6 @@ with tab3:
             st.info("No trades recorded yet")
     else:
         st.info("Track a token to see transaction history")
-
 # Start monitoring when a token is selected
 if st.session_state.tracked_token and not st.session_state.monitor_thread:
     st.session_state.monitor_thread = start_monitoring_thread(st.session_state.tracked_token)
