@@ -7,7 +7,8 @@ import aiohttp
 from datetime import datetime
 
 # Configuration
-BITQUERY_API_KEY = "DwqQuqdVYlmrCEdRM_M_LlT3lN"  # Replace with your actual Bitquery API key
+BITQUERY_API_KEY = "DwqQuqdVYlmrCEdRM_M_LlT3lN"  # Keep as backup
+BITQUERY_ACCESS_TOKEN = "ory_at_Ym84gpJTx1UI5Aj8-MdO0hAYBFo-XKa07YLNPiME6HQ.NX4MnUB-YO3hJoDn_cJu6T_7GvhCYG6eXSkrvz6VpDs"
 BITQUERY_ENDPOINT = "https://graphql.bitquery.io"
 
 # Initialize session state
@@ -60,7 +61,7 @@ async def get_bitquery_token_activity(token_mint: str):
     """Get token activity data from Bitquery GraphQL API"""
     headers = {
         "Content-Type": "application/json",
-        "X-API-KEY": BITQUERY_API_KEY
+        "Authorization": f"Bearer {BITQUERY_ACCESS_TOKEN}"
     }
     
     query = """
@@ -237,7 +238,7 @@ async def get_wallet_transactions(wallet_address: str):
     """Get transaction history for a wallet using Bitquery"""
     headers = {
         "Content-Type": "application/json",
-        "X-API-KEY": BITQUERY_API_KEY
+        "Authorization": f"Bearer {BITQUERY_ACCESS_TOKEN}"
     }
     
     query = """
