@@ -1,7 +1,12 @@
 import asyncio
 import streamlit as st
 import json
+import pandas as pd
+import threading
+import websockets
 from datetime import datetime
+from solders.pubkey import Pubkey
+from solana.rpc.async_api import AsyncClient
 
 # Configuration
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
@@ -17,6 +22,10 @@ if 'token_trades' not in st.session_state:
     st.session_state.token_trades = []
 if 'wallet_history' not in st.session_state:
     st.session_state.wallet_history = {}
+if 'monitor_thread' not in st.session_state:
+    st.session_state.monitor_thread = None
+if 'stop_monitoring' not in st.session_state:
+    st.session_state.stop_monitoring = False
 
 # Page layout
 st.set_page_config(page_title="Pump.fun Token Scanner", layout="wide")
@@ -31,18 +40,20 @@ with st.sidebar:
     if st.button("Start Tracking"):
         if token_address:
             st.session_state.tracked_token = token_address
+            st.session_state.stop_monitoring = False
             st.success(f"Tracking token: {token_address[:6]}...{token_address[-4:]}")
         else:
             st.error("Please enter a valid token address")
     
     if st.session_state.tracked_token:
         if st.button("Stop Tracking"):
+            st.session_state.stop_monitoring = True
+            if st.session_state.monitor_thread and st.session_state.monitor_thread.is_alive():
+                st.session_state.monitor_thread.join(timeout=2)
             st.session_state.tracked_token = None
             st.session_state.tracked_wallets = []
+            st.session_state.monitor_thread = None
             st.info("Stopped tracking")
-
-# Main content tabs
-tab1, tab2, tab3 = st.tabs(["Token Overview", "Wallet Activity", "Transaction History"])
 
 async def get_token_holders(token_mint: str):
     """Get current token holders"""
@@ -51,6 +62,7 @@ async def get_token_holders(token_mint: str):
         Pubkey.from_string(token_mint),
         {"programId": Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")}
     )
+    await client.close()
     return [str(account.pubkey) for account in accounts.value]
 
 async def get_wallet_history(wallet: str):
@@ -60,6 +72,7 @@ async def get_wallet_history(wallet: str):
         Pubkey.from_string(wallet),
         limit=50
     )
+    await client.close()
     return [str(tx.signature) for tx in txs.value]
 
 async def track_token_wallets(token_mint: str):
@@ -86,42 +99,66 @@ async def track_token_wallets(token_mint: str):
 
 async def monitor_token(token_mint: str):
     """WebSocket monitoring for token trades"""
-    async with websockets.connect(PUMP_FUN_WS) as websocket:
-        # Subscribe to token trades
-        await websocket.send(json.dumps({
-            "method": "subscribeTokenTrade",
-            "keys": [token_mint]
-        }))
-        
-        while st.session_state.tracked_token == token_mint:
-            message = await websocket.recv()
-            data = json.loads(message)
+    try:
+        async with websockets.connect(PUMP_FUN_WS) as websocket:
+            # Subscribe to token trades
+            await websocket.send(json.dumps({
+                "method": "subscribeTokenTrade",
+                "keys": [token_mint]
+            }))
             
-            if data.get('type') == 'tokenTrade' and data['token'] == token_mint:
-                # Add to trade history
-                trade_data = {
-                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'tx_hash': data.get('txId', ''),
-                    'wallet': data.get('account', ''),
-                    'amount': data.get('amount', 0),
-                    'price': data.get('price', 0),
-                    'value': data.get('value', 0),
-                    'is_buy': data.get('amount', 0) > 0
-                }
-                st.session_state.token_trades.append(trade_data)
-                
-                # Update wallet list
-                if data['account'] not in st.session_state.tracked_wallets:
-                    st.session_state.tracked_wallets.append(data['account'])
-                
-                # Refresh the display
-                st.rerun()
+            while st.session_state.tracked_token == token_mint and not st.session_state.stop_monitoring:
+                try:
+                    message = await asyncio.wait_for(websocket.recv(), timeout=1)
+                    data = json.loads(message)
+                    
+                    if data.get('type') == 'tokenTrade' and data['token'] == token_mint:
+                        # Add to trade history
+                        trade_data = {
+                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            'tx_hash': data.get('txId', ''),
+                            'wallet': data.get('account', ''),
+                            'amount': data.get('amount', 0),
+                            'price': data.get('price', 0),
+                            'value': data.get('value', 0),
+                            'is_buy': data.get('amount', 0) > 0
+                        }
+                        st.session_state.token_trades.append(trade_data)
+                        
+                        # Update wallet list
+                        if data['account'] not in st.session_state.tracked_wallets:
+                            st.session_state.tracked_wallets.append(data['account'])
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    st.error(f"WebSocket error: {e}")
+                    break
+    except Exception as e:
+        st.error(f"Connection error: {e}")
 
 def run_async(coro):
     """Run async functions in Streamlit"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+def start_monitoring_thread(token_mint: str):
+    """Start monitoring in a separate thread"""
+    def monitor_wrapper():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(monitor_token(token_mint))
+    
+    monitor_thread = threading.Thread(target=monitor_wrapper)
+    monitor_thread.daemon = True
+    monitor_thread.start()
+    return monitor_thread
+
+# Main content tabs
+tab1, tab2, tab3 = st.tabs(["Token Overview", "Wallet Activity", "Transaction History"])
 
 # Token Overview Tab
 with tab1:
@@ -234,9 +271,5 @@ with tab3:
         st.info("Track a token to see transaction history")
 
 # Start monitoring when a token is selected
-if st.session_state.tracked_token:
-    if st.session_state.tracked_token and not hasattr(st.session_state, 'monitor_task'):
-        async def start_monitoring():
-            await monitor_token(st.session_state.tracked_token)
-        
-        st.session_state.monitor_task = asyncio.create_task(start_monitoring())
+if st.session_state.tracked_token and not st.session_state.monitor_thread:
+    st.session_state.monitor_thread = start_monitoring_thread(st.session_state.tracked_token)
