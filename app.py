@@ -250,26 +250,13 @@ with tab1:
                     )
                 else:
                     st.warning("No holders found. This may be a new token.")
-            
-    except Exception as e:
-        st.error(f"Error fetching holders: {str(e)}")
-        st.error("Please ensure:")
-        st.error("1. You're using a valid Pump.fun token address")
-        st.error("2. The token has existing holders")
-        st.error(f"Technical details: {e}")
-        
-        st.subheader("Live Trade Monitor")
-        placeholder = st.empty()
-        if st.session_state.token_trades:
-            last_trade = st.session_state.token_trades[-1]
-            with placeholder.container():
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Last Price", f"{last_trade['price']:.8f} SOL")
-                col2.metric("Amount", f"{abs(last_trade['amount']):,.0f}")
-                col3.metric("Value", f"{last_trade['value']:.2f} SOL")
-                st.caption(f"Wallet: {last_trade['wallet'][:6]}...{last_trade['wallet'][-4:]}")
-    else:
-        st.info("Enter a token address in the sidebar to begin tracking")
+                    
+            except Exception as e:
+                st.error(f"Error fetching holders: {str(e)}")
+                st.error("Please ensure:")
+                st.error("1. You're using a valid Pump.fun token address")
+                st.error("2. The token has existing holders")
+                st.error(f"Technical details: {e}")
 
 # Wallet Activity Tab
 with tab2:
