@@ -58,13 +58,31 @@ with st.sidebar:
 async def get_token_holders(token_mint: str):
     """Get current token holders"""
     client = AsyncClient(SOLANA_RPC)
-    accounts = await client.get_token_accounts_by_owner(
-        Pubkey.from_string(token_mint),
-        {"programId": Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")}
-    )
-    await client.close()
-    return [str(account.pubkey) for account in accounts.value]
-
+    try:
+        # Correct method to get token accounts by MINT (not owner)
+        accounts = await client.get_token_accounts_by_mint(
+            Pubkey.from_string(token_mint),
+            program_id=Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        )
+        
+        holders = []
+        for account in accounts.value:
+            # Properly parse the account data
+            account_info = account.account.data.parsed['info']
+            holder = account_info['owner']
+            amount = int(account_info['tokenAmount']['amount'])
+            if amount > 0:  # Only include accounts with balance
+                holders.append({
+                    'address': holder,
+                    'amount': amount
+                })
+        
+        return holders
+    except Exception as e:
+        print(f"Error fetching holders: {e}")
+        return []
+    finally:
+        await client.close()
 async def get_wallet_history(wallet: str):
     """Get transaction history for a wallet"""
     client = AsyncClient(SOLANA_RPC)
@@ -175,15 +193,16 @@ with tab1:
             else:
                 st.info("No trades recorded yet")
         
-        with col2:
-            st.subheader("Token Holders")
-            try:
-                holders = run_async(get_token_holders(st.session_state.tracked_token))
-                st.metric("Total Holders", len(holders))
-                st.write(f"Top Holders (sample):")
-                st.write(holders[:5])
-            except Exception as e:
-                st.error(f"Error fetching holders: {e}")
+       with col2:
+           st.subheader("Token Holders")
+           try:
+               holders = run_async(get_token_holders(st.session_state.tracked_token))
+               st.metric("Total Holders", len(holders))
+            if holders:
+                df_holders = pd.DataFrame(holders[:5])
+                st.dataframe(df_holders)
+        except Exception as e:
+        st.error(f"Error fetching holders: {e}")
         
         st.subheader("Live Trade Monitor")
         placeholder = st.empty()
