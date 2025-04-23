@@ -194,15 +194,15 @@ with tab1:
                 st.info("No trades recorded yet")
         
        with col2:
-           st.subheader("Token Holders")
-           try:
-               holders = run_async(get_token_holders(st.session_state.tracked_token))
-               st.metric("Total Holders", len(holders))
-            if holders:
-                df_holders = pd.DataFrame(holders[:5])
-                st.dataframe(df_holders)
-        except Exception as e:
-        st.error(f"Error fetching holders: {e}")
+            st.subheader("Token Holders")
+            try:
+                holders = run_async(get_token_holders(st.session_state.tracked_token))
+                st.metric("Total Holders", len(holders))
+                if holders:
+                    df_holders = pd.DataFrame(holders[:5])
+                    st.dataframe(df_holders)
+            except Exception as e:
+                st.error(f"Error fetching holders: {e}")
         
         st.subheader("Live Trade Monitor")
         placeholder = st.empty()
