@@ -1,7 +1,6 @@
 import asyncio
 import streamlit as st
 import json
-import pandas as pd
 from datetime import datetime
 
 # Configuration
