@@ -9,11 +9,11 @@ from datetime import datetime
 from solders.pubkey import Pubkey
 from solana.rpc.async_api import AsyncClient
 
-
 # Configuration
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 PUMP_FUN_WS = "wss://pumpportal.fun/api/data"
 PUMP_FUN_PROGRAM_ID = "PUMPFiWb4agfPrT3VfW5aQyPEB6jNv9QmJ5L5Y8NjqHu"
+HELIUS_API_KEY = "7604d74d-42ff-4316-b5f4-ed1ad1544505"  # Replace with your actual key
 
 # Initialize session state
 if 'tracked_token' not in st.session_state:
@@ -59,7 +59,6 @@ with st.sidebar:
 
 async def get_token_holders(token_mint: str):
     """Get token holders using Helius API"""
-    HELIUS_API_KEY = "7604d74d-42ff-4316-b5f4-ed1ad1544505"  # Replace with your actual API key
     url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
     
     payload = {
@@ -96,7 +95,6 @@ async def get_token_holders(token_mint: str):
                             'ui_amount': account.get('uiAmount', account['amount'] / (10 ** account.get('decimals', 9)))
                         })
                 
-                # Sort by largest holders first
                 holders.sort(key=lambda x: x['amount'], reverse=True)
                 return holders
                 
@@ -104,55 +102,6 @@ async def get_token_holders(token_mint: str):
         print(f"Error fetching holders from Helius: {e}")
         return []
 
-# Modified display code for col2
-with col2:
-    st.subheader("Token Holders (Helius API)")
-    try:
-        holders = run_async(get_token_holders(st.session_state.tracked_token))
-        st.metric("Total Holders", len(holders))
-        
-        if holders:
-            # Create and display the dataframe
-            df_holders = pd.DataFrame(holders[:15])  # Show top 15 holders
-            
-            # Format display
-            df_holders['Wallet'] = df_holders['address'].apply(
-                lambda x: f"{x[:6]}...{x[-4:]}" if len(x) > 10 else x
-            )
-            
-            df_holders['Balance'] = df_holders['ui_amount'].apply(
-                lambda x: f"{x:,.2f}" if x >= 1 else f"{x:.6f}".rstrip('0').rstrip('.') if '.' in f"{x:.6f}" else f"{x:,.0f}"
-            )
-            
-            st.dataframe(
-                df_holders[['Wallet', 'Balance']],
-                column_config={
-                    "Wallet": st.column_config.TextColumn("Wallet", width="medium"),
-                    "Balance": st.column_config.TextColumn("Token Balance")
-                },
-                hide_index=True,
-                use_container_width=True,
-                height=min(400, 35 * len(df_holders) + 40)
-            )
-            
-            # Download button
-            csv = df_holders[['address', 'amount']].rename(
-                columns={'address': 'Wallet', 'amount': 'RawAmount'}
-            ).to_csv(index=False)
-            
-            st.download_button(
-                label="Download Full Holder Data",
-                data=csv,
-                file_name=f"{st.session_state.tracked_token[:10]}_holders.csv",
-                mime='text/csv'
-            )
-        else:
-            st.warning("No holders found or API limit reached")
-            
-    except Exception as e:
-        st.error(f"Error: {str(e)}")
-        st.info("Note: You need a valid Helius API key for this functionality")
-        
 async def get_wallet_history(wallet: str):
     """Get transaction history for a wallet"""
     client = AsyncClient(SOLANA_RPC)
@@ -189,7 +138,6 @@ async def monitor_token(token_mint: str):
     """WebSocket monitoring for token trades"""
     try:
         async with websockets.connect(PUMP_FUN_WS) as websocket:
-            # Subscribe to token trades
             await websocket.send(json.dumps({
                 "method": "subscribeTokenTrade",
                 "keys": [token_mint]
@@ -201,7 +149,6 @@ async def monitor_token(token_mint: str):
                     data = json.loads(message)
                     
                     if data.get('type') == 'tokenTrade' and data['token'] == token_mint:
-                        # Add to trade history
                         trade_data = {
                             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             'tx_hash': data.get('txId', ''),
@@ -213,7 +160,6 @@ async def monitor_token(token_mint: str):
                         }
                         st.session_state.token_trades.append(trade_data)
                         
-                        # Update wallet list
                         if data['account'] not in st.session_state.tracked_wallets:
                             st.session_state.tracked_wallets.append(data['account'])
                 except asyncio.TimeoutError:
@@ -262,6 +208,7 @@ with tab1:
                 st.dataframe(df_trades.sort_values('timestamp', ascending=False), hide_index=True)
             else:
                 st.info("No trades recorded yet")
+        
         with col2:
             st.subheader("Token Holders")
             try:
@@ -269,20 +216,14 @@ with tab1:
                 st.metric("Total Holders", len(holders))
                 
                 if holders:
-                    # Create a nicer dataframe display
-                    df_holders = pd.DataFrame(holders[:10])  # Show top 10 holders
-                    
-                    # Format the amounts
+                    df_holders = pd.DataFrame(holders[:10])
                     df_holders['Formatted Amount'] = df_holders['ui_amount'].apply(
                         lambda x: f"{x:,.2f}" if x >= 1 else f"{x:,.6f}"
                     )
-                    
-                    # Display with wallet shortening
                     df_holders['Wallet'] = df_holders['address'].apply(
                         lambda x: f"{x[:4]}...{x[-4:]}"
                     )
                     
-                    # Show in a nicer table
                     st.dataframe(
                         df_holders[['Wallet', 'Formatted Amount']],
                         column_config={
@@ -297,7 +238,6 @@ with tab1:
                         use_container_width=True
                     )
                     
-                    # Add download button
                     st.download_button(
                         label="Download All Holders",
                         data=df_holders.to_csv(index=False).encode('utf-8'),
@@ -335,7 +275,6 @@ with tab2:
                     st.write(f"Recent Transactions ({len(history)}):")
                     st.write(history[:10])
                     
-                    # Show wallet's trades for the tracked token
                     wallet_trades = [t for t in st.session_state.token_trades if t['wallet'] == selected_wallet]
                     if wallet_trades:
                         st.subheader("Token-Specific Trades")
@@ -356,7 +295,6 @@ with tab3:
         if st.session_state.token_trades:
             df_all_trades = pd.DataFrame(st.session_state.token_trades)
             
-            # Filters
             col1, col2 = st.columns(2)
             with col1:
                 min_value = st.number_input("Minimum Trade Value (SOL)", min_value=0.0, value=1.0)
@@ -364,7 +302,6 @@ with tab3:
                 show_buys = st.checkbox("Show Buys", value=True)
                 show_sells = st.checkbox("Show Sells", value=True)
             
-            # Apply filters
             filtered = df_all_trades[df_all_trades['value'] >= min_value]
             if show_buys and not show_sells:
                 filtered = filtered[filtered['is_buy']]
@@ -373,7 +310,6 @@ with tab3:
             
             st.dataframe(filtered.sort_values('timestamp', ascending=False), hide_index=True)
             
-            # Stats
             st.subheader("Trade Statistics")
             col1, col2, col3 = st.columns(3)
             col1.metric("Total Trades", len(df_all_trades))
