@@ -192,8 +192,7 @@ with tab1:
                 st.dataframe(df_trades.sort_values('timestamp', ascending=False), hide_index=True)
             else:
                 st.info("No trades recorded yet")
-        
-       with col2:
+        with col2:
             st.subheader("Token Holders")
             try:
                 holders = run_async(get_token_holders(st.session_state.tracked_token))
