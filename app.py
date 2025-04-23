@@ -56,33 +56,47 @@ with st.sidebar:
             st.info("Stopped tracking")
 
 async def get_token_holders(token_mint: str):
-    """Get current token holders"""
+    """Get current holders of a Pump.fun token"""
     client = AsyncClient(SOLANA_RPC)
     try:
-        # Correct method to get token accounts by MINT (not owner)
-        accounts = await client.get_token_accounts_by_mint(
-            Pubkey.from_string(token_mint),
-            program_id=Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        # Pump.fun uses a bonding curve account that holds the liquidity
+        # First we need to find the bonding curve account for this token
+        bonding_curve_account = Pubkey.find_program_address(
+            [bytes(Pubkey.from_string(token_mint))],
+            Pubkey.from_string(PUMP_FUN_PROGRAM_ID)
+        )[0]
+        
+        # Get all token accounts holding this mint
+        response = await client.get_token_accounts_by_mint(
+            mint=Pubkey.from_string(token_mint),
+            program_id=Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+            encoding="jsonParsed"
         )
         
         holders = []
-        for account in accounts.value:
-            # Properly parse the account data
+        for account in response.value:
             account_info = account.account.data.parsed['info']
-            holder = account_info['owner']
+            owner = account_info['owner']
             amount = int(account_info['tokenAmount']['amount'])
-            if amount > 0:  # Only include accounts with balance
+            
+            # Exclude the bonding curve account and empty wallets
+            if amount > 0 and owner != str(bonding_curve_account):
                 holders.append({
-                    'address': holder,
-                    'amount': amount
+                    'address': owner,
+                    'amount': amount,
+                    'ui_amount': float(account_info['tokenAmount']['uiAmount'])
                 })
         
+        # Sort by largest holders first
+        holders.sort(key=lambda x: x['amount'], reverse=True)
         return holders
+        
     except Exception as e:
         print(f"Error fetching holders: {e}")
         return []
     finally:
         await client.close()
+        
 async def get_wallet_history(wallet: str):
     """Get transaction history for a wallet"""
     client = AsyncClient(SOLANA_RPC)
@@ -197,11 +211,52 @@ with tab1:
             try:
                 holders = run_async(get_token_holders(st.session_state.tracked_token))
                 st.metric("Total Holders", len(holders))
+                
                 if holders:
-                    df_holders = pd.DataFrame(holders[:5])
-                    st.dataframe(df_holders)
-            except Exception as e:
-                st.error(f"Error fetching holders: {e}")
+                    # Create a nicer dataframe display
+                    df_holders = pd.DataFrame(holders[:10])  # Show top 10 holders
+                    
+                    # Format the amounts
+                    df_holders['Formatted Amount'] = df_holders['ui_amount'].apply(
+                        lambda x: f"{x:,.2f}" if x >= 1 else f"{x:,.6f}"
+                    )
+                    
+                    # Display with wallet shortening
+                    df_holders['Wallet'] = df_holders['address'].apply(
+                        lambda x: f"{x[:4]}...{x[-4:]}"
+                    )
+                    
+                    # Show in a nicer table
+                    st.dataframe(
+                        df_holders[['Wallet', 'Formatted Amount']],
+                        column_config={
+                            "Wallet": st.column_config.TextColumn("Wallet", width="medium"),
+                            "Formatted Amount": st.column_config.NumberColumn(
+                                "Token Balance", 
+                                format="%.6f",
+                                width="medium"
+                            )
+                        },
+                        hide_index=True,
+                        use_container_width=True
+                    )
+                    
+                    # Add download button
+                    st.download_button(
+                        label="Download All Holders",
+                        data=df_holders.to_csv(index=False).encode('utf-8'),
+                        file_name=f"{st.session_state.tracked_token[:5]}_holders.csv",
+                        mime='text/csv'
+                    )
+                else:
+                    st.warning("No holders found. This may be a new token.")
+            
+    except Exception as e:
+        st.error(f"Error fetching holders: {str(e)}")
+        st.error("Please ensure:")
+        st.error("1. You're using a valid Pump.fun token address")
+        st.error("2. The token has existing holders")
+        st.error(f"Technical details: {e}")
         
         st.subheader("Live Trade Monitor")
         placeholder = st.empty()
