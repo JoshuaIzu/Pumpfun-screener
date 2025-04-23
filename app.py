@@ -4,9 +4,11 @@ import json
 import pandas as pd
 import threading
 import websockets
+import aiohttp
 from datetime import datetime
 from solders.pubkey import Pubkey
 from solana.rpc.async_api import AsyncClient
+
 
 # Configuration
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
@@ -56,46 +58,100 @@ with st.sidebar:
             st.info("Stopped tracking")
 
 async def get_token_holders(token_mint: str):
-    """Get current holders of a Pump.fun token"""
-    client = AsyncClient(SOLANA_RPC)
+    """Get token holders using Helius API"""
+    HELIUS_API_KEY = "YOUR_API_KEY"  # Replace with your actual API key
+    url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+    
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": "getTokenAccounts",
+        "params": [{
+            "mint": token_mint,
+            "page": 1,
+            "limit": 1000,
+            "displayOptions": {
+                "showZeroBalance": False
+            }
+        }]
+    }
+    
     try:
-        # Pump.fun uses a bonding curve account that holds the liquidity
-        # First we need to find the bonding curve account for this token
-        bonding_curve_account = Pubkey.find_program_address(
-            [bytes(Pubkey.from_string(token_mint))],
-            Pubkey.from_string(PUMP_FUN_PROGRAM_ID)
-        )[0]
-        
-        # Get all token accounts holding this mint
-        response = await client.get_token_accounts_by_mint(
-            mint=Pubkey.from_string(token_mint),
-            program_id=Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
-            encoding="jsonParsed"
-        )
-        
-        holders = []
-        for account in response.value:
-            account_info = account.account.data.parsed['info']
-            owner = account_info['owner']
-            amount = int(account_info['tokenAmount']['amount'])
-            
-            # Exclude the bonding curve account and empty wallets
-            if amount > 0 and owner != str(bonding_curve_account):
-                holders.append({
-                    'address': owner,
-                    'amount': amount,
-                    'ui_amount': float(account_info['tokenAmount']['uiAmount'])
-                })
-        
-        # Sort by largest holders first
-        holders.sort(key=lambda x: x['amount'], reverse=True)
-        return holders
-        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                data = await response.json()
+                
+                if 'error' in data:
+                    print(f"Helius API error: {data['error']}")
+                    return []
+                
+                accounts = data.get('result', {}).get('token_accounts', [])
+                
+                holders = []
+                for account in accounts:
+                    if 'owner' in account and 'amount' in account:
+                        holders.append({
+                            'address': account['owner'],
+                            'amount': account['amount'],
+                            'ui_amount': account.get('uiAmount', account['amount'] / (10 ** account.get('decimals', 9)))
+                        })
+                
+                # Sort by largest holders first
+                holders.sort(key=lambda x: x['amount'], reverse=True)
+                return holders
+                
     except Exception as e:
-        print(f"Error fetching holders: {e}")
+        print(f"Error fetching holders from Helius: {e}")
         return []
-    finally:
-        await client.close()
+
+# Modified display code for col2
+with col2:
+    st.subheader("Token Holders (Helius API)")
+    try:
+        holders = run_async(get_token_holders(st.session_state.tracked_token))
+        st.metric("Total Holders", len(holders))
+        
+        if holders:
+            # Create and display the dataframe
+            df_holders = pd.DataFrame(holders[:15])  # Show top 15 holders
+            
+            # Format display
+            df_holders['Wallet'] = df_holders['address'].apply(
+                lambda x: f"{x[:6]}...{x[-4:]}" if len(x) > 10 else x
+            )
+            
+            df_holders['Balance'] = df_holders['ui_amount'].apply(
+                lambda x: f"{x:,.2f}" if x >= 1 else f"{x:.6f}".rstrip('0').rstrip('.') if '.' in f"{x:.6f}" else f"{x:,.0f}"
+            )
+            
+            st.dataframe(
+                df_holders[['Wallet', 'Balance']],
+                column_config={
+                    "Wallet": st.column_config.TextColumn("Wallet", width="medium"),
+                    "Balance": st.column_config.TextColumn("Token Balance")
+                },
+                hide_index=True,
+                use_container_width=True,
+                height=min(400, 35 * len(df_holders) + 40)
+            )
+            
+            # Download button
+            csv = df_holders[['address', 'amount']].rename(
+                columns={'address': 'Wallet', 'amount': 'RawAmount'}
+            ).to_csv(index=False)
+            
+            st.download_button(
+                label="Download Full Holder Data",
+                data=csv,
+                file_name=f"{st.session_state.tracked_token[:10]}_holders.csv",
+                mime='text/csv'
+            )
+        else:
+            st.warning("No holders found or API limit reached")
+            
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        st.info("Note: You need a valid Helius API key for this functionality")
         
 async def get_wallet_history(wallet: str):
     """Get transaction history for a wallet"""
