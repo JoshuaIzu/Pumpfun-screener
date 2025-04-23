@@ -59,7 +59,7 @@ with st.sidebar:
 
 async def get_token_holders(token_mint: str):
     """Get token holders using Helius API"""
-    HELIUS_API_KEY = "YOUR_API_KEY"  # Replace with your actual API key
+    HELIUS_API_KEY = "7604d74d-42ff-4316-b5f4-ed1ad1544505"  # Replace with your actual API key
     url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
     
     payload = {
