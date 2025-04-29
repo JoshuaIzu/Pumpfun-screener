@@ -28,44 +28,32 @@ if 'bitquery_last_update' not in st.session_state:
 if 'token_info' not in st.session_state:
     st.session_state.token_info = {}
 
-# Page layout
-st.set_page_config(page_title="Solana Token Scanner", layout="wide")
-st.title("🚀 Solana Token Scanner")
-st.markdown("Track token activity and wallet transactions on Solana")
+# Helper Functions
+def run_async(coro):
+    """Run async functions in Streamlit"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    except Exception as e:
+        st.error(f"Error in async operation: {e}")
+        return None, None, {}
+    finally:
+        loop.close()
 
-# Sidebar for token input
-with st.sidebar:
-    st.header("Token Scanner")
-    token_address = st.text_input("Enter Token Address", help="The token mint address on Solana")
+def start_monitoring_thread(token_mint: str):
+    """Start monitoring in a separate thread"""
+    def monitor_wrapper():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(monitor_token(token_mint))
     
-    if st.button("Start Tracking"):
-        if token_address:
-            st.session_state.tracked_token = token_address
-            st.session_state.stop_monitoring = False
-            st.session_state.token_trades = []  # Reset trades when starting a new token
-            st.session_state.token_info = {}  # Reset token info
-            st.session_state.tracked_wallets = []  # Reset tracked wallets
-            st.success(f"Tracking token: {token_address[:6]}...{token_address[-4:]}")
-            
-            # Start monitoring thread immediately
-            if st.session_state.monitor_thread and st.session_state.monitor_thread.is_alive():
-                st.session_state.stop_monitoring = True
-                st.session_state.monitor_thread.join(timeout=1)
-            st.session_state.monitor_thread = start_monitoring_thread(token_address)
-        else:
-            st.error("Please enter a valid token address")
-    
-    if st.session_state.tracked_token:
-        if st.button("Stop Tracking"):
-            st.session_state.stop_monitoring = True
-            if st.session_state.monitor_thread and st.session_state.monitor_thread.is_alive():
-                st.session_state.monitor_thread.join(timeout=2)
-            st.session_state.tracked_token = None
-            st.session_state.tracked_wallets = []
-            st.session_state.monitor_thread = None
-            st.session_state.bitquery_last_update = None
-            st.info("Stopped tracking")
+    monitor_thread = threading.Thread(target=monitor_wrapper)
+    monitor_thread.daemon = True
+    monitor_thread.start()
+    return monitor_thread
 
+# Async Functions
 async def get_bitquery_token_activity(token_mint: str):
     """Get token activity data from Bitquery GraphQL API"""
     headers = {
@@ -73,7 +61,6 @@ async def get_bitquery_token_activity(token_mint: str):
         "Authorization": f"Bearer {BITQUERY_ACCESS_TOKEN}"
     }
     
-    # Get current time and time 24 hours ago for the query
     now = datetime.utcnow()
     twenty_four_hours_ago = now - timedelta(hours=24)
     
@@ -197,7 +184,6 @@ async def process_bitquery_data(token_mint: str):
     holders = []
     token_info = {}
     
-    # Extract token info from the first transfer or trade
     try:
         if "Solana" in data["data"]:
             if "Transfers" in data["data"]["Solana"] and data["data"]["Solana"]["Transfers"]:
@@ -217,11 +203,9 @@ async def process_bitquery_data(token_mint: str):
     except Exception as e:
         st.error(f"Error extracting token info: {e}")
     
-    # Process transfers
     if "Solana" in data["data"] and "Transfers" in data["data"]["Solana"]:
         for transfer in data["data"]["Solana"]["Transfers"]:
             t = transfer["Transfer"]
-            
             try:
                 trade_data = {
                     'timestamp': datetime.fromisoformat(t["Block"]["Timestamp"].replace("Z", "")).strftime("%Y-%m-%d %H:%M:%S"),
@@ -229,15 +213,14 @@ async def process_bitquery_data(token_mint: str):
                     'wallet': t["Sender"]["Address"],
                     'receiver': t["Receiver"]["Address"],
                     'amount': float(t["Amount"]),
-                    'price': 0,  # Transfer doesn't have price
+                    'price': 0,
                     'value': float(t.get("AmountInUSD", 0)),
-                    'is_buy': False,  # Transfer is neither buy nor sell, but we need to classify
+                    'is_buy': False,
                     'type': 'transfer',
                     'block_height': t["Block"]["Height"]
                 }
                 trades.append(trade_data)
                 
-                # Add wallets to tracked wallets
                 if t["Sender"]["Address"] not in st.session_state.tracked_wallets:
                     st.session_state.tracked_wallets.append(t["Sender"]["Address"])
                 if t["Receiver"]["Address"] not in st.session_state.tracked_wallets:
@@ -245,19 +228,15 @@ async def process_bitquery_data(token_mint: str):
             except Exception as e:
                 st.error(f"Error processing transfer: {e}")
     
-    # Process DEX trades
     if "Solana" in data["data"] and "DEXTrades" in data["data"]["Solana"]:
         for trade in data["data"]["Solana"]["DEXTrades"]:
             t = trade["Trade"]
-            
             try:
-                # Determine if this is a buy or sell from the token's perspective
                 is_buy = t["Buy"]["Currency"]["SmartContract"] == token_mint
-                
                 trade_data = {
                     'timestamp': datetime.fromisoformat(t["Block"]["Timestamp"].replace("Z", "")).strftime("%Y-%m-%d %H:%M:%S"),
                     'tx_hash': t["Transaction"]["Hash"],
-                    'wallet': "DEX Trade",  # We don't have wallet info directly
+                    'wallet': "DEX Trade",
                     'amount': float(t["Buy"]["Amount"] if is_buy else t["Sell"]["Amount"]),
                     'price': float(t["Buy"]["Price"] if is_buy else t["Sell"]["Price"]),
                     'value': float(t["Buy"].get("AmountInUSD", 0)) if is_buy else float(float(t["Sell"]["Amount"]) * float(t["Sell"]["Price"])),
@@ -271,7 +250,6 @@ async def process_bitquery_data(token_mint: str):
             except Exception as e:
                 st.error(f"Error processing trade: {e}")
     
-    # Process token holders
     if "Solana" in data["data"] and "TokenHolders" in data["data"]["Solana"]:
         for holder in data["data"]["Solana"]["TokenHolders"]:
             h = holder["BalanceUpdate"]
@@ -294,7 +272,6 @@ async def get_wallet_transactions(wallet_address: str):
         "Authorization": f"Bearer {BITQUERY_ACCESS_TOKEN}"
     }
     
-    # Get current time and time 24 hours ago for the query
     now = datetime.utcnow()
     twenty_four_hours_ago = now - timedelta(hours=24)
     
@@ -376,70 +353,74 @@ async def get_wallet_transactions(wallet_address: str):
 async def monitor_token(token_mint: str):
     """Polling-based monitoring for token activity"""
     try:
-        # Initial data fetch
         trades, holders, token_info = await process_bitquery_data(token_mint)
         if token_info:
             st.session_state.token_info = token_info
             
         for trade in trades:
-            # Check if this trade already exists
             if not any(t['tx_hash'] == trade['tx_hash'] for t in st.session_state.token_trades):
                 st.session_state.token_trades.append(trade)
         
         st.session_state.bitquery_last_update = datetime.now()
         
-        # Polling loop
         while st.session_state.tracked_token == token_mint and not st.session_state.stop_monitoring:
-            # Wait for 30 seconds before polling again
             await asyncio.sleep(30)
             
-            # Skip if stopped during sleep
             if st.session_state.stop_monitoring:
                 break
                 
-            # Poll for new data
             new_trades, new_holders, new_token_info = await process_bitquery_data(token_mint)
             
-            # Add only new trades based on transaction hash and block height
             existing_hashes = {t['tx_hash'] for t in st.session_state.token_trades}
             for trade in new_trades:
                 if trade['tx_hash'] not in existing_hashes:
                     st.session_state.token_trades.append(trade)
                     existing_hashes.add(trade['tx_hash'])
             
-            # Update timestamp
             st.session_state.bitquery_last_update = datetime.now()
             
-            # Update token info if we got new data
             if new_token_info:
                 st.session_state.token_info = new_token_info
             
     except Exception as e:
         st.error(f"Monitoring error: {e}")
 
-def run_async(coro):
-    """Run async functions in Streamlit"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    except Exception as e:
-        st.error(f"Error in async operation: {e}")
-        return None, None, {}
-    finally:
-        loop.close()
+# UI Layout
+st.set_page_config(page_title="Solana Token Scanner", layout="wide")
+st.title("🚀 Solana Token Scanner")
+st.markdown("Track token activity and wallet transactions on Solana")
 
-def start_monitoring_thread(token_mint: str):
-    """Start monitoring in a separate thread"""
-    def monitor_wrapper():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(monitor_token(token_mint))
+# Sidebar for token input
+with st.sidebar:
+    st.header("Token Scanner")
+    token_address = st.text_input("Enter Token Address", help="The token mint address on Solana")
     
-    monitor_thread = threading.Thread(target=monitor_wrapper)
-    monitor_thread.daemon = True
-    monitor_thread.start()
-    return monitor_thread
+    if st.button("Start Tracking"):
+        if token_address:
+            st.session_state.tracked_token = token_address
+            st.session_state.stop_monitoring = False
+            st.session_state.token_trades = []
+            st.session_state.token_info = {}
+            st.session_state.tracked_wallets = []
+            st.success(f"Tracking token: {token_address[:6]}...{token_address[-4:]}")
+            
+            if st.session_state.monitor_thread and st.session_state.monitor_thread.is_alive():
+                st.session_state.stop_monitoring = True
+                st.session_state.monitor_thread.join(timeout=1)
+            st.session_state.monitor_thread = start_monitoring_thread(token_address)
+        else:
+            st.error("Please enter a valid token address")
+    
+    if st.session_state.tracked_token:
+        if st.button("Stop Tracking"):
+            st.session_state.stop_monitoring = True
+            if st.session_state.monitor_thread and st.session_state.monitor_thread.is_alive():
+                st.session_state.monitor_thread.join(timeout=2)
+            st.session_state.tracked_token = None
+            st.session_state.tracked_wallets = []
+            st.session_state.monitor_thread = None
+            st.session_state.bitquery_last_update = None
+            st.info("Stopped tracking")
 
 # Main content tabs
 tab1, tab2, tab3 = st.tabs(["Token Overview", "Wallet Activity", "Transaction History"])
@@ -447,7 +428,6 @@ tab1, tab2, tab3 = st.tabs(["Token Overview", "Wallet Activity", "Transaction Hi
 # Token Overview Tab
 with tab1:
     if st.session_state.tracked_token:
-        # Display token info if available
         if st.session_state.token_info:
             token_display = (
                 f"{st.session_state.token_info.get('symbol', 'Unknown')} "
@@ -466,19 +446,16 @@ with tab1:
         with col1:
             st.subheader("Recent Activity")
             if st.session_state.token_trades:
-                # Add filter for data sources
                 data_sources = ["All Sources", "DEX Trades", "Transfers"]
                 selected_source = st.selectbox("Data Source", data_sources)
                 
                 df_trades = pd.DataFrame(st.session_state.token_trades[-50:])
                 
-                # Filter by selected source
                 if selected_source == "DEX Trades":
                     df_trades = df_trades[df_trades['type'] == 'dex_trade']
                 elif selected_source == "Transfers":
                     df_trades = df_trades[df_trades['type'] == 'transfer']
                 
-                # Format columns for better display
                 if not df_trades.empty:
                     df_trades['amount'] = df_trades['amount'].apply(lambda x: f"{x:,.2f}")
                     df_trades['price'] = df_trades['price'].apply(lambda x: f"{x:,.6f}" if x > 0 else "N/A")
@@ -507,7 +484,6 @@ with tab1:
         with col2:
             st.subheader("Token Holders")
             
-            # Fetch holder data again using Bitquery
             try:
                 _, holders, _ = run_async(process_bitquery_data(st.session_state.tracked_token))
                 
@@ -569,7 +545,6 @@ with tab2:
                         st.write(f"Recent Transactions ({len(transactions)}):")
                         df_txs = pd.DataFrame(transactions)
                         
-                        # Format columns
                         df_txs['amount'] = df_txs['amount'].apply(lambda x: f"{x:,.2f}")
                         df_txs['value_usd'] = df_txs['value_usd'].apply(lambda x: f"${x:,.2f}" if x > 0 else "N/A")
                         
@@ -590,14 +565,12 @@ with tab2:
                     else:
                         st.info("No transactions found for this wallet")
                     
-                    # Filter trades for this wallet
                     wallet_trades = [t for t in st.session_state.token_trades 
                                    if t.get('wallet') == selected_wallet or t.get('receiver') == selected_wallet]
                     if wallet_trades:
                         st.subheader("Token-Specific Activity")
                         df_wallet_trades = pd.DataFrame(wallet_trades)
                         
-                        # Format columns
                         df_wallet_trades['amount'] = df_wallet_trades['amount'].apply(lambda x: f"{x:,.2f}")
                         df_wallet_trades['price'] = df_wallet_trades['price'].apply(lambda x: f"{x:,.6f}" if x > 0 else "N/A")
                         df_wallet_trades['value'] = df_wallet_trades['value'].apply(lambda x: f"${x:,.2f}" if x > 0 else "N/A")
@@ -642,7 +615,6 @@ with tab3:
             with col3:
                 show_transfers = st.checkbox("Show Transfers", value=True)
             
-            # Apply filters
             filtered = df_all_trades[df_all_trades['value'] >= min_value]
             
             filters = []
@@ -656,10 +628,9 @@ with tab3:
             if filters:
                 filtered = filtered[pd.concat(filters, axis=1).any(axis=1)]
             else:
-                filtered = pd.DataFrame()  # Empty if no filters selected
+                filtered = pd.DataFrame()
             
             if not filtered.empty:
-                # Format columns
                 filtered['amount'] = filtered['amount'].apply(lambda x: f"{x:,.2f}")
                 filtered['price'] = filtered['price'].apply(lambda x: f"{x:,.6f}" if x > 0 else "N/A")
                 filtered['value'] = filtered['value'].apply(lambda x: f"${x:,.2f}" if x > 0 else "N/A")
@@ -687,14 +658,12 @@ with tab3:
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Total Transactions", len(filtered))
                 
-                # Calculate trade volume stats
                 buy_volume = filtered[(filtered['is_buy'] == True) & (filtered['type'] != 'transfer')]['value'].str.replace('$', '').str.replace(',', '').astype(float).sum()
                 sell_volume = filtered[(filtered['is_buy'] == False) & (filtered['type'] != 'transfer')]['value'].str.replace('$', '').str.replace(',', '').astype(float).sum()
                 
                 col2.metric("Buy Volume", f"${buy_volume:,.2f}")
                 col3.metric("Sell Volume", f"${sell_volume:,.2f}")
                 
-                # Add download button
                 st.download_button(
                     label="Download Transaction History",
                     data=filtered.to_csv(index=False).encode('utf-8'),
