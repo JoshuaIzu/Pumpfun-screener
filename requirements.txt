@@ -4,5 +4,5 @@ numpy==1.26.0
 requests==2.31.0
 websockets
 solders
-solana
+solana 
 aiohttp==3.9.1
