@@ -10,6 +10,10 @@ BITQUERY_API_KEY = "p8HQx2XC5WVzK2dQATvUSjvGY4"  # Keep as backup
 BITQUERY_ACCESS_TOKEN = "ory_at_J8RO-utFAeWyhZsPagkoV1yZZUD-GGX_ZQMqEeb9Q6Q.VRWDqmXZFzXzPeZox_865Jxo5m2b3HzGtasWrMacpOQ"
 BITQUERY_ENDPOINT = "https://graphql.bitquery.io"
 
+# Solana Configuration
+SOLANA_RPC_ENDPOINT = "https://api.mainnet-beta.solana.com"
+PUMPFUN_PROGRAM_ID = "PFUNzK5Ej2iLfBiuYCGDPHih1ZJUzPCCoHn9CiwYtWK"  # PumpFun Program ID
+
 # Initialize session state
 if 'tracked_token' not in st.session_state:
     st.session_state.tracked_token = None
@@ -53,307 +57,230 @@ def start_monitoring_thread(token_mint: str):
     monitor_thread.start()
     return monitor_thread
 
-# Async Functions
-async def get_bitquery_token_activity(token_mint: str):
-    """Get token activity data from Bitquery GraphQL API"""
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {BITQUERY_ACCESS_TOKEN}"
-    }
-    
-    now = datetime.utcnow()
-    twenty_four_hours_ago = now - timedelta(hours=24)
-    
-    query = """
-    query TokenActivity($token: String!, $since: ISO8601DateTime) {
-      Solana {
-        Transfers(
-          where: {Transfer: {Currency: {SmartContract: {is: $token}}, Block: {Timestamp: {after: $since}}}
-          limit: {count: 50}
-          orderBy: {descending: Block_Timestamp}
-        ) {
-          Transfer {
-            Currency {
-              Symbol
-              Name
-              SmartContract
-            }
-            Amount
-            AmountInUSD
-            Sender {
-              Address
-            }
-            Receiver {
-              Address
-            }
-            Block {
-              Timestamp
-              Height
-            }
-            Transaction {
-              Hash
-            }
-          }
-        }
-        DEXTrades(
-          where: {Trade: {Buy: {Currency: {SmartContract: {is: $token}}}, Block: {Timestamp: {after: $since}}}
-          limit: {count: 50}
-          orderBy: {descending: Block_Timestamp}
-        ) {
-          Trade {
-            Dex {
-              ProtocolName
-              ProgramAddress
-            }
-            Buy {
-              Currency {
-                Symbol
-                Name
-                SmartContract
-              }
-              Amount
-              Price
-              AmountInUSD: AmountInUsd
-            }
-            Sell {
-              Currency {
-                Symbol
-                Name
-                SmartContract
-              }
-              Amount
-              Price
-            }
-            Transaction {
-              Hash
-            }
-            Block {
-              Timestamp
-              Height
-            }
-            TradeIndex
-          }
-        }
-        TokenHolders: BalanceUpdates(
-          where: {BalanceUpdate: {Currency: {SmartContract: {is: $token}}}
-          orderBy: {descendingByField: "amount"}
-          limit: {count: 100}
-        ) {
-          BalanceUpdate {
-            Address
-            Amount
-            AmountInUSD: AmountInUsd
-          }
-        }
-      }
-    }
-    """
-    
-    variables = {
-        "token": token_mint,
-        "since": twenty_four_hours_ago.isoformat() + "Z"
-    }
-    
-    payload = {
-        "query": query,
-        "variables": variables
-    }
-    
+# New Solana RPC Functions
+async def get_solana_token_info(token_mint: str):
+    """Get token metadata from Solana RPC API"""
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(BITQUERY_ENDPOINT, json=payload, headers=headers) as response:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getAccountInfo",
+                "params": [
+                    token_mint,
+                    {"encoding": "jsonParsed"}
+                ]
+            }
+            
+            async with session.post(SOLANA_RPC_ENDPOINT, json=payload) as response:
                 if response.status == 200:
                     data = await response.json()
-                    return data
-                else:
-                    error_text = await response.text()
-                    st.error(f"Bitquery API error: Status {response.status}")
-                    st.error(f"Error details: {error_text}")
-                    return None
+                    if "result" in data and data["result"] and "value" in data["result"]:
+                        account_data = data["result"]["value"]
+                        if "data" in account_data and "parsed" in account_data["data"]:
+                            info = account_data["data"]["parsed"]["info"]
+                            token_info = {
+                                "symbol": info.get("symbol", "Unknown"),
+                                "name": info.get("name", "Unknown"),
+                                "contract": token_mint,
+                                "decimals": info.get("decimals", 9),
+                                "supply": info.get("supply", "0")
+                            }
+                            return token_info
+                return {"symbol": "Unknown", "name": "Unknown", "contract": token_mint, "decimals": 9, "supply": "0"}
     except Exception as e:
-        st.error(f"Error fetching data from Bitquery: {e}")
-        return None
+        st.error(f"Error fetching token info: {e}")
+        return {"symbol": "Unknown", "name": "Unknown", "contract": token_mint, "decimals": 9, "supply": "0"}
 
-async def process_bitquery_data(token_mint: str):
-    """Process Bitquery data into a format compatible with our app"""
-    data = await get_bitquery_token_activity(token_mint)
-    if not data or "data" not in data:
-        return [], [], {}
-    
-    trades = []
-    holders = []
-    token_info = {}
-    
-    try:
-        if "Solana" in data["data"]:
-            if "Transfers" in data["data"]["Solana"] and data["data"]["Solana"]["Transfers"]:
-                first_transfer = data["data"]["Solana"]["Transfers"][0]["Transfer"]
-                token_info = {
-                    "symbol": first_transfer["Currency"]["Symbol"] or "Unknown",
-                    "name": first_transfer["Currency"]["Name"] or "Unknown",
-                    "contract": first_transfer["Currency"]["SmartContract"]
-                }
-            elif "DEXTrades" in data["data"]["Solana"] and data["data"]["Solana"]["DEXTrades"]:
-                first_trade = data["data"]["Solana"]["DEXTrades"][0]["Trade"]
-                token_info = {
-                    "symbol": first_trade["Buy"]["Currency"]["Symbol"] or "Unknown",
-                    "name": first_trade["Buy"]["Currency"]["Name"] or "Unknown",
-                    "contract": first_trade["Buy"]["Currency"]["SmartContract"]
-                }
-    except Exception as e:
-        st.error(f"Error extracting token info: {e}")
-    
-    if "Solana" in data["data"] and "Transfers" in data["data"]["Solana"]:
-        for transfer in data["data"]["Solana"]["Transfers"]:
-            t = transfer["Transfer"]
-            try:
-                trade_data = {
-                    'timestamp': datetime.fromisoformat(t["Block"]["Timestamp"].replace("Z", "")).strftime("%Y-%m-%d %H:%M:%S"),
-                    'tx_hash': t["Transaction"]["Hash"],
-                    'wallet': t["Sender"]["Address"],
-                    'receiver': t["Receiver"]["Address"],
-                    'amount': float(t["Amount"]),
-                    'price': 0,
-                    'value': float(t.get("AmountInUSD", 0)),
-                    'is_buy': False,
-                    'type': 'transfer',
-                    'block_height': t["Block"]["Height"]
-                }
-                trades.append(trade_data)
-                
-                if t["Sender"]["Address"] not in st.session_state.tracked_wallets:
-                    st.session_state.tracked_wallets.append(t["Sender"]["Address"])
-                if t["Receiver"]["Address"] not in st.session_state.tracked_wallets:
-                    st.session_state.tracked_wallets.append(t["Receiver"]["Address"])
-            except Exception as e:
-                st.error(f"Error processing transfer: {e}")
-    
-    if "Solana" in data["data"] and "DEXTrades" in data["data"]["Solana"]:
-        for trade in data["data"]["Solana"]["DEXTrades"]:
-            t = trade["Trade"]
-            try:
-                is_buy = t["Buy"]["Currency"]["SmartContract"] == token_mint
-                trade_data = {
-                    'timestamp': datetime.fromisoformat(t["Block"]["Timestamp"].replace("Z", "")).strftime("%Y-%m-%d %H:%M:%S"),
-                    'tx_hash': t["Transaction"]["Hash"],
-                    'wallet': "DEX Trade",
-                    'amount': float(t["Buy"]["Amount"] if is_buy else t["Sell"]["Amount"]),
-                    'price': float(t["Buy"]["Price"] if is_buy else t["Sell"]["Price"]),
-                    'value': float(t["Buy"].get("AmountInUSD", 0)) if is_buy else float(float(t["Sell"]["Amount"]) * float(t["Sell"]["Price"])),
-                    'is_buy': is_buy,
-                    'type': 'dex_trade',
-                    'dex': t["Dex"]["ProtocolName"],
-                    'block_height': t["Block"]["Height"],
-                    'trade_index': t.get("TradeIndex", 0)
-                }
-                trades.append(trade_data)
-            except Exception as e:
-                st.error(f"Error processing trade: {e}")
-    
-    if "Solana" in data["data"] and "TokenHolders" in data["data"]["Solana"]:
-        for holder in data["data"]["Solana"]["TokenHolders"]:
-            h = holder["BalanceUpdate"]
-            try:
-                holder_data = {
-                    'address': h["Address"],
-                    'amount': float(h["Amount"]),
-                    'value_usd': float(h.get("AmountInUSD", 0))
-                }
-                holders.append(holder_data)
-            except Exception as e:
-                st.error(f"Error processing holder: {e}")
-    
-    return trades, holders, token_info
-
-async def get_wallet_transactions(wallet_address: str):
-    """Get transaction history for a wallet using Bitquery"""
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {BITQUERY_ACCESS_TOKEN}"
-    }
-    
-    now = datetime.utcnow()
-    twenty_four_hours_ago = now - timedelta(hours=24)
-    
-    query = """
-    query WalletActivity($address: String!, $since: ISO8601DateTime) {
-      Solana {
-        Transfers(
-          where: {Transfer: {Sender: {Address: {is: $address}}, Block: {Timestamp: {after: $since}}}
-          limit: {count: 20}
-          orderBy: {descending: Block_Timestamp}
-        ) {
-          Transfer {
-            Currency {
-              Symbol
-              Name
-              SmartContract
-            }
-            Amount
-            AmountInUSD: AmountInUsd
-            Receiver {
-              Address
-            }
-            Block {
-              Timestamp
-              Height
-            }
-            Transaction {
-              Hash
-            }
-          }
-        }
-      }
-    }
-    """
-    
-    variables = {
-        "address": wallet_address,
-        "since": twenty_four_hours_ago.isoformat() + "Z"
-    }
-    
-    payload = {
-        "query": query,
-        "variables": variables
-    }
-    
+async def get_pumpfun_token_transactions(token_mint: str):
+    """Get token transactions from Solana RPC using signatures for address"""
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(BITQUERY_ENDPOINT, json=payload, headers=headers) as response:
+            # First get recent signatures for the token mint address
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getSignaturesForAddress",
+                "params": [
+                    token_mint,
+                    {"limit": 50}
+                ]
+            }
+            
+            transactions = []
+            async with session.post(SOLANA_RPC_ENDPOINT, json=payload) as response:
                 if response.status == 200:
                     data = await response.json()
-                    transactions = []
-                    
-                    if "data" in data and "Solana" in data["data"] and "Transfers" in data["data"]["Solana"]:
-                        for transfer in data["data"]["Solana"]["Transfers"]:
-                            t = transfer["Transfer"]
-                            try:
-                                tx = {
-                                    'hash': t["Transaction"]["Hash"],
-                                    'timestamp': datetime.fromisoformat(t["Block"]["Timestamp"].replace("Z", "")).strftime("%Y-%m-%d %H:%M:%S"),
-                                    'currency': t["Currency"]["Symbol"] or t["Currency"]["SmartContract"][:10],
-                                    'amount': float(t["Amount"]),
-                                    'receiver': t["Receiver"]["Address"],
-                                    'value_usd': float(t.get("AmountInUSD", 0)),
-                                    'block_height': t["Block"]["Height"]
-                                }
-                                transactions.append(tx)
-                            except Exception as e:
-                                st.error(f"Error processing wallet transaction: {e}")
-                    
-                    return transactions
-                else:
-                    error_text = await response.text()
-                    st.error(f"Wallet query error: {response.status} - {error_text}")
-                    return []
+                    if "result" in data and data["result"]:
+                        signatures = [item["signature"] for item in data["result"]]
+                        
+                        # Get transaction details for each signature
+                        for signature in signatures:
+                            tx_payload = {
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": "getTransaction",
+                                "params": [
+                                    signature,
+                                    {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
+                                ]
+                            }
+                            
+                            async with session.post(SOLANA_RPC_ENDPOINT, json=tx_payload) as tx_response:
+                                if tx_response.status == 200:
+                                    tx_data = await tx_response.json()
+                                    if "result" in tx_data and tx_data["result"]:
+                                        try:
+                                            tx_result = tx_data["result"]
+                                            block_time = tx_result.get("blockTime", 0)
+                                            timestamp = datetime.fromtimestamp(block_time).strftime("%Y-%m-%d %H:%M:%S")
+                                            
+                                            # Get transaction message and account keys
+                                            tx_message = tx_result.get("transaction", {}).get("message", {})
+                                            account_keys = tx_message.get("accountKeys", [])
+                                            
+                                            # Extract relevant information
+                                            sender = account_keys[0]["pubkey"] if account_keys else "Unknown"
+                                            receiver = None
+                                            amount = 0
+                                            
+                                            # Try to extract transfer info from instructions
+                                            instructions = tx_result.get("meta", {}).get("innerInstructions", [])
+                                            if instructions:
+                                                for inner in instructions:
+                                                    for instruction in inner.get("instructions", []):
+                                                        if "parsed" in instruction and instruction["parsed"].get("type") == "transfer":
+                                                            info = instruction["parsed"]["info"]
+                                                            amount = float(info.get("amount", 0))
+                                                            receiver = info.get("destination")
+                                            
+                                            # Process PumpFun-specific instructions if applicable
+                                            is_pump_tx = PUMPFUN_PROGRAM_ID in [acc["pubkey"] for acc in account_keys] if account_keys else False
+                                            
+                                            tx_hash = signature
+                                            trade_data = {
+                                                'timestamp': timestamp,
+                                                'tx_hash': tx_hash,
+                                                'wallet': sender,
+                                                'receiver': receiver if receiver else "Unknown",
+                                                'amount': amount,
+                                                'price': 0,  # Will need market data to determine price
+                                                'value': 0,  # Will need market data to determine USD value
+                                                'is_buy': False,
+                                                'type': 'pumpfun_tx' if is_pump_tx else 'transfer',
+                                                'block_height': tx_result.get("slot", 0)
+                                            }
+                                            transactions.append(trade_data)
+                                            
+                                            # Keep track of wallets involved
+                                            if sender and sender not in st.session_state.tracked_wallets:
+                                                st.session_state.tracked_wallets.append(sender)
+                                            if receiver and receiver not in st.session_state.tracked_wallets:
+                                                st.session_state.tracked_wallets.append(receiver)
+                                                
+                                        except Exception as e:
+                                            st.error(f"Error processing transaction {signature}: {e}")
+            return transactions
+    except Exception as e:
+        st.error(f"Error fetching PumpFun transactions: {e}")
+        return []
+
+async def get_token_holders(token_mint: str):
+    """Get token holder information"""
+    # This would typically require an indexer or specialized API
+    # For demonstration, returning a placeholder
+    try:
+        return [{"address": "Sample Holder", "amount": 1000, "value_usd": 100}]
+    except Exception as e:
+        st.error(f"Error fetching holders: {e}")
+        return []
+
+async def get_wallet_solana_transactions(wallet_address: str):
+    """Get wallet transaction history using Solana RPC"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getSignaturesForAddress",
+                "params": [
+                    wallet_address,
+                    {"limit": 20}
+                ]
+            }
+            
+            transactions = []
+            async with session.post(SOLANA_RPC_ENDPOINT, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if "result" in data and data["result"]:
+                        signatures = [item["signature"] for item in data["result"]]
+                        
+                        for signature in signatures:
+                            tx_payload = {
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": "getTransaction",
+                                "params": [
+                                    signature,
+                                    {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
+                                ]
+                            }
+                            
+                            async with session.post(SOLANA_RPC_ENDPOINT, json=tx_payload) as tx_response:
+                                if tx_response.status == 200:
+                                    tx_data = await tx_response.json()
+                                    if "result" in tx_data and tx_data["result"]:
+                                        tx_result = tx_data["result"]
+                                        
+                                        # Basic transaction info
+                                        block_time = tx_result.get("blockTime", 0)
+                                        timestamp = datetime.fromtimestamp(block_time).strftime("%Y-%m-%d %H:%M:%S")
+                                        
+                                        # Extract token information if available
+                                        currency = "SOL"  # Default to SOL
+                                        amount = 0
+                                        receiver = "Unknown"
+                                        
+                                        # Look for token transfers in the transaction
+                                        try:
+                                            for instruction in tx_result.get("meta", {}).get("innerInstructions", []):
+                                                for inner in instruction.get("instructions", []):
+                                                    if "parsed" in inner and inner["parsed"].get("type") == "transfer":
+                                                        info = inner["parsed"]["info"]
+                                                        amount = float(info.get("amount", 0))
+                                                        receiver = info.get("destination", "Unknown")
+                                        except:
+                                            pass
+                                        
+                                        tx = {
+                                            'hash': signature,
+                                            'timestamp': timestamp,
+                                            'currency': currency,
+                                            'amount': amount,
+                                            'receiver': receiver,
+                                            'value_usd': 0,  # Would need price data
+                                            'block_height': tx_result.get("slot", 0)
+                                        }
+                                        transactions.append(tx)
+            return transactions
     except Exception as e:
         st.error(f"Error fetching wallet data: {e}")
         return []
 
+async def process_solana_data(token_mint: str):
+    """Process Solana data into a format compatible with our app"""
+    token_info = await get_solana_token_info(token_mint)
+    trades = await get_pumpfun_token_transactions(token_mint)
+    holders = await get_token_holders(token_mint)
+    
+    return trades, holders, token_info
+
+# Modified monitor function to use Solana data
 async def monitor_token(token_mint: str):
-    """Polling-based monitoring for token activity"""
+    """Polling-based monitoring for token activity using Solana RPC"""
     try:
-        trades, holders, token_info = await process_bitquery_data(token_mint)
+        trades, holders, token_info = await process_solana_data(token_mint)
         if token_info:
             st.session_state.token_info = token_info
             
@@ -369,7 +296,7 @@ async def monitor_token(token_mint: str):
             if st.session_state.stop_monitoring:
                 break
                 
-            new_trades, new_holders, new_token_info = await process_bitquery_data(token_mint)
+            new_trades, new_holders, new_token_info = await process_solana_data(token_mint)
             
             existing_hashes = {t['tx_hash'] for t in st.session_state.token_trades}
             for trade in new_trades:
@@ -386,9 +313,9 @@ async def monitor_token(token_mint: str):
         st.error(f"Monitoring error: {e}")
 
 # UI Layout
-st.set_page_config(page_title="Solana Token Scanner", layout="wide")
-st.title("🚀 Solana Token Scanner")
-st.markdown("Track token activity and wallet transactions on Solana")
+st.set_page_config(page_title="PumpFun Token Scanner", layout="wide")
+st.title("🚀 PumpFun Token Scanner")
+st.markdown("Track PumpFun token activity and wallet transactions on Solana")
 
 # Sidebar for token input
 with st.sidebar:
@@ -421,6 +348,14 @@ with st.sidebar:
             st.session_state.monitor_thread = None
             st.session_state.bitquery_last_update = None
             st.info("Stopped tracking")
+            
+    # Add PumpFun specific options
+    st.header("PumpFun Options")
+    st.checkbox("Track PumpFun Events Only", value=True, 
+                help="When checked, only show transactions related to the PumpFun protocol")
+    
+    st.markdown("---")
+    st.caption("Using Solana Foundation RPC")
 
 # Main content tabs
 tab1, tab2, tab3 = st.tabs(["Token Overview", "Wallet Activity", "Transaction History"])
@@ -446,13 +381,13 @@ with tab1:
         with col1:
             st.subheader("Recent Activity")
             if st.session_state.token_trades:
-                data_sources = ["All Sources", "DEX Trades", "Transfers"]
+                data_sources = ["All Sources", "PumpFun Events", "Transfers"]
                 selected_source = st.selectbox("Data Source", data_sources)
                 
                 df_trades = pd.DataFrame(st.session_state.token_trades[-50:])
                 
-                if selected_source == "DEX Trades":
-                    df_trades = df_trades[df_trades['type'] == 'dex_trade']
+                if selected_source == "PumpFun Events":
+                    df_trades = df_trades[df_trades['type'] == 'pumpfun_tx']
                 elif selected_source == "Transfers":
                     df_trades = df_trades[df_trades['type'] == 'transfer']
                 
@@ -474,8 +409,7 @@ with tab1:
                             "price": "Price",
                             "value": "Value",
                             "is_buy": "Is Buy",
-                            "type": "Type",
-                            "dex": "DEX"
+                            "type": "Type"
                         }
                     )
             else:
@@ -485,14 +419,14 @@ with tab1:
             st.subheader("Token Holders")
             
             try:
-                _, holders, _ = run_async(process_bitquery_data(st.session_state.tracked_token))
+                _, holders, _ = run_async(process_solana_data(st.session_state.tracked_token))
                 
                 if holders:
                     st.metric("Total Holders", len(holders))
                     
                     df_holders = pd.DataFrame(holders[:10])
                     df_holders['Wallet'] = df_holders['address'].apply(
-                        lambda x: f"{x[:4]}...{x[-4:]}"
+                        lambda x: f"{x[:4]}...{x[-4:]}" if isinstance(x, str) else x
                     )
                     
                     df_holders['Formatted Amount'] = df_holders['amount'].apply(
@@ -531,15 +465,15 @@ with tab2:
             selected_wallet = st.selectbox(
                 "Select Wallet to Inspect",
                 st.session_state.tracked_wallets,
-                format_func=lambda x: f"{x[:6]}...{x[-4:]}"
+                format_func=lambda x: f"{x[:6]}...{x[-4:]}" if isinstance(x, str) and len(x) > 10 else x
             )
             
             if selected_wallet:
                 try:
-                    transactions = run_async(get_wallet_transactions(selected_wallet))
+                    transactions = run_async(get_wallet_solana_transactions(selected_wallet))
                     st.session_state.wallet_history[selected_wallet] = transactions
                     
-                    st.subheader(f"Wallet: {selected_wallet[:6]}...{selected_wallet[-4:]}")
+                    st.subheader(f"Wallet: {selected_wallet[:6]}...{selected_wallet[-4:]}" if isinstance(selected_wallet, str) and len(selected_wallet) > 10 else selected_wallet)
                     
                     if transactions:
                         st.write(f"Recent Transactions ({len(transactions)}):")
@@ -608,20 +542,20 @@ with tab3:
             
             col1, col2, col3 = st.columns(3)
             with col1:
-                min_value = st.number_input("Minimum Value (USD)", min_value=0.0, value=1.0, step=1.0)
+                min_value = st.number_input("Minimum Value (USD)", min_value=0.0, value=0.0, step=1.0)
             with col2:
-                show_buys = st.checkbox("Show Buys", value=True)
-                show_sells = st.checkbox("Show Sells", value=True)
+                show_pumpfun = st.checkbox("Show PumpFun Events", value=True)
             with col3:
                 show_transfers = st.checkbox("Show Transfers", value=True)
             
-            filtered = df_all_trades[df_all_trades['value'] >= min_value]
+            # For PumpFun events, we might not have accurate value data yet
+            filtered = df_all_trades
+            if min_value > 0:
+                filtered = df_all_trades[df_all_trades['value'] >= min_value]
             
             filters = []
-            if show_buys:
-                filters.append((filtered['is_buy'] == True) & (filtered['type'] != 'transfer'))
-            if show_sells:
-                filters.append((filtered['is_buy'] == False) & (filtered['type'] != 'transfer'))
+            if show_pumpfun:
+                filters.append(filtered['type'] == 'pumpfun_tx')
             if show_transfers:
                 filters.append(filtered['type'] == 'transfer')
             
@@ -649,7 +583,6 @@ with tab3:
                         "value": "Value",
                         "is_buy": "Is Buy",
                         "type": "Type",
-                        "dex": "DEX",
                         "block_height": "Block"
                     }
                 )
@@ -658,11 +591,13 @@ with tab3:
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Total Transactions", len(filtered))
                 
-                buy_volume = filtered[(filtered['is_buy'] == True) & (filtered['type'] != 'transfer')]['value'].str.replace('$', '').str.replace(',', '').astype(float).sum()
-                sell_volume = filtered[(filtered['is_buy'] == False) & (filtered['type'] != 'transfer')]['value'].str.replace('$', '').str.replace(',', '').astype(float).sum()
+                # For PumpFun transactions, we might need different metrics
+                tx_by_type = filtered['type'].value_counts().to_dict()
+                pumpfun_count = tx_by_type.get('pumpfun_tx', 0)
+                transfer_count = tx_by_type.get('transfer', 0)
                 
-                col2.metric("Buy Volume", f"${buy_volume:,.2f}")
-                col3.metric("Sell Volume", f"${sell_volume:,.2f}")
+                col2.metric("PumpFun Events", pumpfun_count)
+                col3.metric("Transfers", transfer_count)
                 
                 st.download_button(
                     label="Download Transaction History",
