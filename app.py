@@ -186,11 +186,59 @@ async def get_pumpfun_token_transactions(token_mint: str):
         return []
 
 async def get_token_holders(token_mint: str):
-    """Get token holder information"""
-    # This would typically require an indexer or specialized API
-    # For demonstration, returning a placeholder
+    """Get token holder information from Solana RPC"""
     try:
-        return [{"address": "Sample Holder", "amount": 1000, "value_usd": 100}]
+        async with aiohttp.ClientSession() as session:
+            # First, get the token's largest accounts
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenLargestAccounts",
+                "params": [token_mint]
+            }
+            
+            holders = []
+            async with session.post(SOLANA_RPC_ENDPOINT, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if "result" in data and "value" in data["result"]:
+                        token_accounts = data["result"]["value"]
+                        
+                        for account in token_accounts:
+                            # Get account info for each token account
+                            acc_payload = {
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": "getAccountInfo",
+                                "params": [
+                                    account["address"],
+                                    {"encoding": "jsonParsed"}
+                                ]
+                            }
+                            
+                            async with session.post(SOLANA_RPC_ENDPOINT, json=acc_payload) as acc_response:
+                                if acc_response.status == 200:
+                                    acc_data = await acc_response.json()
+                                    if "result" in acc_data and acc_data["result"] and "value" in acc_data["result"]:
+                                        try:
+                                            parsed_data = acc_data["result"]["value"].get("data", {}).get("parsed", {})
+                                            if "info" in parsed_data:
+                                                info = parsed_data["info"]
+                                                owner = info.get("owner", "Unknown")
+                                                amount = float(info.get("tokenAmount", {}).get("uiAmount", 0))
+                                                
+                                                holders.append({
+                                                    "address": owner,
+                                                    "amount": amount,
+                                                    "value_usd": 0  # Would need price data to calculate
+                                                })
+                                        except Exception as e:
+                                            st.error(f"Error processing account {account['address']}: {e}")
+            
+            if not holders:
+                st.warning("No holders found. This may be a new token.")
+                
+            return holders
     except Exception as e:
         st.error(f"Error fetching holders: {e}")
         return []
