@@ -6,8 +6,8 @@ import aiohttp
 from datetime import datetime, timedelta
 
 # Configuration
-BITQUERY_API_KEY = "DwqQuqdVYlmrCEdRM_M_LlT3lN"  # Keep as backup
-BITQUERY_ACCESS_TOKEN = "ory_at_Ym84gpJTx1UI5Aj8-MdO0hAYBFo-XKa07YLNPiME6HQ.NX4MnUB-YO3hJoDn_cJu6T_7GvhCYG6eXSkrvz6VpDs"
+BITQUERY_API_KEY = "p8HQx2XC5WVzK2dQATvUSjvGY4"  # Keep as backup
+BITQUERY_ACCESS_TOKEN = "ory_at_J8RO-utFAeWyhZsPagkoV1yZZUD-GGX_ZQMqEeb9Q6Q.VRWDqmXZFzXzPeZox_865Jxo5m2b3HzGtasWrMacpOQ"
 BITQUERY_ENDPOINT = "https://graphql.bitquery.io"
 
 # Initialize session state
