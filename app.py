@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import threading
 import aiohttp
+import solana
 from datetime import datetime, timedelta
 
 # Configuration
