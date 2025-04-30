@@ -6,10 +6,6 @@ import aiohttp
 from datetime import datetime, timedelta
 
 # Configuration
-BITQUERY_API_KEY = "p8HQx2XC5WVzK2dQATvUSjvGY4"  # Keep as backup
-BITQUERY_ACCESS_TOKEN = "ory_at_J8RO-utFAeWyhZsPagkoV1yZZUD-GGX_ZQMqEeb9Q6Q.VRWDqmXZFzXzPeZox_865Jxo5m2b3HzGtasWrMacpOQ"
-BITQUERY_ENDPOINT = "https://graphql.bitquery.io"
-
 # Solana Configuration
 SOLANA_RPC_ENDPOINT = "https://api.mainnet-beta.solana.com"
 PUMPFUN_PROGRAM_ID = "PFUNzK5Ej2iLfBiuYCGDPHih1ZJUzPCCoHn9CiwYtWK"  # PumpFun Program ID
@@ -27,8 +23,8 @@ if 'monitor_thread' not in st.session_state:
     st.session_state.monitor_thread = None
 if 'stop_monitoring' not in st.session_state:
     st.session_state.stop_monitoring = False
-if 'bitquery_last_update' not in st.session_state:
-    st.session_state.bitquery_last_update = None
+if 'last_update' not in st.session_state:
+    st.session_state.last_update = None
 if 'token_info' not in st.session_state:
     st.session_state.token_info = {}
 
@@ -239,106 +235,142 @@ async def get_pumpfun_token_transactions(token_mint: str):
 async def get_token_holders(token_mint: str):
     """Get token holder information from Solana RPC"""
     try:
-        async with aiohttp.ClientSession() as session:
-            # First, get the token's largest accounts
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getTokenLargestAccounts",
-                "params": [token_mint]
-            }
+        # Check if we already have cached data to avoid repeated calls
+        if 'holder_cache' not in st.session_state:
+            st.session_state.holder_cache = {}
             
-            holders = []
-            async with session.post(SOLANA_RPC_ENDPOINT, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    
-                    # Debug point: Check for errors in response
-                    if "error" in data:
-                        st.error(f"API Error: {data['error']['message']}")
-                        return []
-                    
-                    if "result" in data and "value" in data["result"]:
-                        token_accounts = data["result"]["value"]
-                        
-                        # Debug: Log account count
-                        st.debug(f"Found {len(token_accounts)} token accounts to process")
-                        
-                        for account in token_accounts:
-                            # Get account info for each token account
-                            acc_payload = {
-                                "jsonrpc": "2.0",
-                                "id": 1,
-                                "method": "getAccountInfo",
-                                "params": [
-                                    account["address"],
-                                    {"encoding": "jsonParsed"}
-                                ]
-                            }
-                            
-                            async with session.post(SOLANA_RPC_ENDPOINT, json=acc_payload) as acc_response:
-                                if acc_response.status == 200:
-                                    acc_data = await acc_response.json()
-                                    if "error" in acc_data:
-                                        st.error(f"Account API Error: {acc_data['error']['message']}")
-                                        continue
-                                        
-                                    if "result" in acc_data and acc_data["result"] and "value" in acc_data["result"]:
-                                        try:
-                                            value_data = acc_data["result"]["value"]
-                                            
-                                            # Check if this is a token account
-                                            if not value_data.get("data", {}).get("program", "") == "spl-token":
-                                                continue
-                                                
-                                            parsed_data = value_data.get("data", {}).get("parsed", {})
-                                            if "info" in parsed_data:
-                                                info = parsed_data["info"]
-                                                owner = info.get("owner", "Unknown")
-                                                
-                                                # Handle different token amount formats
-                                                token_amount = info.get("tokenAmount", {})
-                                                if isinstance(token_amount, dict):
-                                                    amount = float(token_amount.get("uiAmount", 0) or 0)
-                                                else:
-                                                    amount = 0
-                                                    
-                                                # Only add non-zero balances
-                                                if amount > 0:
-                                                    holders.append({
-                                                        "address": owner,
-                                                        "amount": amount,
-                                                        "value_usd": 0  # Will be enriched with price data
-                                                    })
-                                        except Exception as e:
-                                            st.error(f"Error processing account {account['address']}: {e}")
-                    else:
-                        # Debug: Show what data we got
-                        st.warning(f"Invalid response format from getTokenLargestAccounts: {data}")
-            
-            # Process holders by combining duplicate addresses
-            processed_holders = {}
-            for holder in holders:
-                address = holder["address"]
-                if address in processed_holders:
-                    processed_holders[address]["amount"] += holder["amount"]
-                else:
-                    processed_holders[address] = holder
-            
-            # Convert back to list
-            final_holders = list(processed_holders.values())
-            
-            if not final_holders:
-                st.warning("No holders found. This may be a new token.")
-                # Try an alternative approach for new tokens
-                # For demonstration, return a placeholder entry
-                return [{"address": "Token Creator", "amount": 1000, "value_usd": 0}]
+        # Get from cache if available and less than 5 minutes old
+        cache_key = f"{token_mint}_holders"
+        if cache_key in st.session_state.holder_cache:
+            cached_data = st.session_state.holder_cache[cache_key]
+            cache_time = cached_data.get("timestamp", None)
+            if cache_time and (datetime.now() - cache_time).total_seconds() < 300:  # 5 minutes cache
+                return cached_data.get("holders", [])
+        
+        # Show a spinner while loading holders
+        with st.spinner("Loading token holders..."):
+            async with aiohttp.ClientSession() as session:
+                # Get largest accounts with a custom timeout to prevent hanging
+                timeout = aiohttp.ClientTimeout(total=15)  # 15 second timeout
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getTokenLargestAccounts",
+                    "params": [token_mint]
+                }
                 
-            return final_holders
+                holders = []
+                try:
+                    async with session.post(SOLANA_RPC_ENDPOINT, json=payload, timeout=timeout) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            
+                            # Check for errors in response
+                            if "error" in data:
+                                error_msg = data['error'].get('message', 'Unknown error')
+                                st.error(f"API Error: {error_msg}")
+                                return [{"address": "API Error", "amount": 0, "value_usd": 0}]
+                            
+                            if "result" in data and "value" in data["result"]:
+                                token_accounts = data["result"]["value"]
+                                
+                                # Limit accounts to process to improve performance
+                                MAX_ACCOUNTS = 10  # Only get top 10 holders for better performance
+                                accounts_to_process = token_accounts[:MAX_ACCOUNTS]
+                                
+                                # Process accounts in parallel for better performance
+                                async def process_account(account):
+                                    account_address = account["address"]
+                                    acc_payload = {
+                                        "jsonrpc": "2.0",
+                                        "id": 1,
+                                        "method": "getAccountInfo",
+                                        "params": [
+                                            account_address,
+                                            {"encoding": "jsonParsed"}
+                                        ]
+                                    }
+                                    
+                                    try:
+                                        async with session.post(SOLANA_RPC_ENDPOINT, json=acc_payload, timeout=timeout) as acc_response:
+                                            if acc_response.status == 200:
+                                                acc_data = await acc_response.json()
+                                                
+                                                if "error" in acc_data:
+                                                    return None
+                                                    
+                                                if "result" in acc_data and acc_data["result"] and "value" in acc_data["result"]:
+                                                    value_data = acc_data["result"]["value"]
+                                                    
+                                                    if not value_data.get("data", {}).get("program", "") == "spl-token":
+                                                        return None
+                                                        
+                                                    parsed_data = value_data.get("data", {}).get("parsed", {})
+                                                    if "info" in parsed_data:
+                                                        info = parsed_data["info"]
+                                                        owner = info.get("owner", "Unknown")
+                                                        
+                                                        token_amount = info.get("tokenAmount", {})
+                                                        if isinstance(token_amount, dict):
+                                                            amount = float(token_amount.get("uiAmount", 0) or 0)
+                                                        else:
+                                                            amount = 0
+                                                            
+                                                        if amount > 0:
+                                                            return {
+                                                                "address": owner,
+                                                                "amount": amount,
+                                                                "value_usd": 0
+                                                            }
+                                            return None
+                                    except Exception:
+                                        return None
+                                
+                                # Process accounts in parallel with asyncio.gather
+                                holder_results = await asyncio.gather(*[process_account(account) for account in accounts_to_process], 
+                                                                    return_exceptions=False)
+                                
+                                # Filter out Nones and process results
+                                holders = [holder for holder in holder_results if holder is not None]
+                                
+                                # Process holders by combining duplicate addresses
+                                processed_holders = {}
+                                for holder in holders:
+                                    address = holder["address"]
+                                    if address in processed_holders:
+                                        processed_holders[address]["amount"] += holder["amount"]
+                                    else:
+                                        processed_holders[address] = holder
+                                
+                                # Convert back to list
+                                final_holders = list(processed_holders.values())
+                                
+                                # Cache the result for future use
+                                st.session_state.holder_cache[cache_key] = {
+                                    "holders": final_holders,
+                                    "timestamp": datetime.now()
+                                }
+                                
+                                if not final_holders:
+                                    # Return a placeholder for empty results
+                                    return [{"address": "No holders found", "amount": 0, "value_usd": 0}]
+                                
+                                return final_holders
+                            else:
+                                # Debug: Show what data we got
+                                return [{"address": "Invalid response", "amount": 0, "value_usd": 0}]
+                except asyncio.TimeoutError:
+                    st.warning("Token holder request timed out. Try again later.")
+                    return [{"address": "Request timed out", "amount": 0, "value_usd": 0}]
+                except Exception as e:
+                    st.error(f"Error fetching token holders: {str(e)}")
+                    return [{"address": "Error occurred", "amount": 0, "value_usd": 0}]
+                
+                # Fallback return in case we missed any condition
+                return [{"address": "No data available", "amount": 0, "value_usd": 0}]
     except Exception as e:
-        st.error(f"Error fetching holders: {e}")
-        # Return a placeholder for testing
-        return [{"address": "Error occurred - placeholder", "amount": 1000, "value_usd": 0}]
+        st.error(f"Error in holder function: {e}")
+        return [{"address": "Error in processing", "amount": 0, "value_usd": 0}]
 
 async def get_wallet_solana_transactions(wallet_address: str):
     """Get wallet transaction history using Solana RPC with timeout handling"""
@@ -592,7 +624,7 @@ async def monitor_token(token_mint: str):
             if not any(t['tx_hash'] == trade['tx_hash'] for t in st.session_state.token_trades):
                 st.session_state.token_trades.append(trade)
         
-        st.session_state.bitquery_last_update = datetime.now()
+        st.session_state.last_update = datetime.now()
         
         while st.session_state.tracked_token == token_mint and not st.session_state.stop_monitoring:
             await asyncio.sleep(30)
@@ -608,7 +640,7 @@ async def monitor_token(token_mint: str):
                     st.session_state.token_trades.append(trade)
                     existing_hashes.add(trade['tx_hash'])
             
-            st.session_state.bitquery_last_update = datetime.now()
+            st.session_state.last_update = datetime.now()
             
             if new_token_info:
                 st.session_state.token_info = new_token_info
@@ -650,7 +682,7 @@ with st.sidebar:
             st.session_state.tracked_token = None
             st.session_state.tracked_wallets = []
             st.session_state.monitor_thread = None
-            st.session_state.bitquery_last_update = None
+            st.session_state.last_update = None
             st.info("Stopped tracking")
             
     # Add PumpFun specific options
@@ -677,8 +709,8 @@ with tab1:
         
         st.header(f"Token: {token_display}")
         
-        if st.session_state.bitquery_last_update:
-            st.caption(f"Last updated: {st.session_state.bitquery_last_update.strftime('%Y-%m-%d %H:%M:%S')}")
+        if st.session_state.last_update:
+            st.caption(f"Last updated: {st.session_state.last_update.strftime('%Y-%m-%d %H:%M:%S')}")
         
         col1, col2 = st.columns(2)
         
