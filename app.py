@@ -341,16 +341,19 @@ async def get_token_holders(token_mint: str):
         return [{"address": "Error occurred - placeholder", "amount": 1000, "value_usd": 0}]
 
 async def get_wallet_solana_transactions(wallet_address: str):
-    """Get wallet transaction history using Solana RPC"""
+    """Get wallet transaction history using Solana RPC with timeout handling"""
     try:
-        async with aiohttp.ClientSession() as session:
+        # Create timeout for the session to prevent hanging
+        timeout = aiohttp.ClientTimeout(total=10)  # 10 second timeout
+        
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "getSignaturesForAddress",
                 "params": [
                     wallet_address,
-                    {"limit": 20}
+                    {"limit": 10}  # Reduced from 20 to 10 for faster loading
                 ]
             }
             
@@ -361,7 +364,8 @@ async def get_wallet_solana_transactions(wallet_address: str):
                     if "result" in data and data["result"]:
                         signatures = [item["signature"] for item in data["result"]]
                         
-                        for signature in signatures:
+                        # Process signatures in smaller batches for better responsiveness
+                        for signature in signatures[:5]:  # Only process the 5 most recent transactions initially
                             tx_payload = {
                                 "jsonrpc": "2.0",
                                 "id": 1,
@@ -372,84 +376,26 @@ async def get_wallet_solana_transactions(wallet_address: str):
                                 ]
                             }
                             
-                            async with session.post(SOLANA_RPC_ENDPOINT, json=tx_payload) as tx_response:
-                                if tx_response.status == 200:
-                                    tx_data = await tx_response.json()
-                                    if "result" in tx_data and tx_data["result"]:
-                                        tx_result = tx_data["result"]
-                                        
-                                        # Basic transaction info
-                                        block_time = tx_result.get("blockTime", 0)
-                                        timestamp = datetime.fromtimestamp(block_time).strftime("%Y-%m-%d %H:%M:%S")
-                                        
-                                        # Extract token information if available
-                                        currency = "SOL"  # Default to SOL
-                                        amount = 0
-                                        receiver = "Unknown"
-                                        
-                                        # Check for token balance changes
-                                        meta = tx_result.get("meta", {})
-                                        post_token_balances = meta.get("postTokenBalances", [])
-                                        pre_token_balances = meta.get("preTokenBalances", [])
-                                        
-                                        # If we have token balances, try to calculate the amount transferred
-                                        if post_token_balances or pre_token_balances:
-                                            # Group by owner and mint
-                                            by_token_owner = {}
+                            try:
+                                async with session.post(SOLANA_RPC_ENDPOINT, json=tx_payload) as tx_response:
+                                    if tx_response.status == 200:
+                                        tx_data = await tx_response.json()
+                                        if "result" in tx_data and tx_data["result"]:
+                                            tx_result = tx_data["result"]
                                             
-                                            # Process pre balances
-                                            for balance in pre_token_balances:
-                                                mint = balance.get("mint")
-                                                owner = balance.get("owner", "Unknown")
-                                                ui_amount = float(balance.get("uiTokenAmount", {}).get("uiAmount", 0) or 0)
-                                                
-                                                key = f"{mint}:{owner}"
-                                                by_token_owner[key] = {"mint": mint, "owner": owner, "pre": ui_amount, "post": 0}
+                                            # Basic transaction info
+                                            block_time = tx_result.get("blockTime", 0)
+                                            timestamp = datetime.fromtimestamp(block_time).strftime("%Y-%m-%d %H:%M:%S")
                                             
-                                            # Process post balances
-                                            for balance in post_token_balances:
-                                                mint = balance.get("mint")
-                                                owner = balance.get("owner", "Unknown")
-                                                ui_amount = float(balance.get("uiTokenAmount", {}).get("uiAmount", 0) or 0)
-                                                
-                                                key = f"{mint}:{owner}"
-                                                if key in by_token_owner:
-                                                    by_token_owner[key]["post"] = ui_amount
-                                                else:
-                                                    by_token_owner[key] = {"mint": mint, "owner": owner, "pre": 0, "post": ui_amount}
+                                            # Extract token information if available
+                                            currency = "SOL"  # Default to SOL
+                                            amount = 0
+                                            receiver = "Unknown"
                                             
-                                            # Find significant balance changes
-                                            for key, token_data in by_token_owner.items():
-                                                diff = token_data["post"] - token_data["pre"]
-                                                
-                                                # If this wallet's balance decreased
-                                                if token_data["owner"] == wallet_address and diff < 0:
-                                                    amount = abs(diff)
-                                                    currency = token_data["mint"]
-                                                    
-                                                    # Try to find the receiver
-                                                    for other_key, other_data in by_token_owner.items():
-                                                        if other_data["mint"] == currency and other_data["owner"] != wallet_address and other_data["post"] - other_data["pre"] > 0:
-                                                            receiver = other_data["owner"]
-                                                            break
-                                                
-                                                # If this wallet's balance increased
-                                                elif token_data["owner"] == wallet_address and diff > 0:
-                                                    amount = abs(diff)
-                                                    currency = token_data["mint"]
-                                                    
-                                                    # Try to find the sender
-                                                    for other_key, other_data in by_token_owner.items():
-                                                        if other_data["mint"] == currency and other_data["owner"] != wallet_address and other_data["pre"] - other_data["post"] > 0:
-                                                            # This is a receive transaction
-                                                            receiver = wallet_address  # The current wallet is the receiver
-                                                            break
-                                        
-                                        # If no token balance changes, check for SOL transfers
-                                        if amount == 0:
-                                            sol_transfer = False
+                                            # Simplified token balance processing for better performance
+                                            meta = tx_result.get("meta", {})
                                             
-                                            # Check post and pre balances for SOL transfers
+                                            # Look for fast SOL transfer identification first
                                             post_balances = meta.get("postBalances", [])
                                             pre_balances = meta.get("preBalances", [])
                                             
@@ -469,83 +415,99 @@ async def get_wallet_solana_transactions(wallet_address: str):
                                                     if wallet_idx >= 0 and wallet_idx < len(pre_balances) and wallet_idx < len(post_balances):
                                                         sol_diff = (post_balances[wallet_idx] - pre_balances[wallet_idx]) / 1_000_000_000  # lamports to SOL
                                                         
-                                                        if sol_diff < 0:  # Sent SOL
+                                                        if abs(sol_diff) > 0.0001:  # Only significant transfers
                                                             amount = abs(sol_diff)
                                                             currency = "SOL"
-                                                            sol_transfer = True
                                                             
-                                                            # Try to find receiver
-                                                            for idx, (pre, post) in enumerate(zip(pre_balances, post_balances)):
-                                                                if idx != wallet_idx and post - pre > 0:
-                                                                    receiver = account_keys[idx]["pubkey"]
-                                                                    break
-                                                        elif sol_diff > 0:  # Received SOL
-                                                            amount = abs(sol_diff)
-                                                            currency = "SOL"
-                                                            receiver = wallet_address  # The current wallet is the receiver
-                                                            sol_transfer = True
-                                                            
-                                                            # Try to find sender
-                                                            for idx, (pre, post) in enumerate(zip(pre_balances, post_balances)):
-                                                                if idx != wallet_idx and post - pre < 0:
-                                                                    # This would be the sender but we don't need it in this view
+                                                            # Simplified receiver detection for performance
+                                                            if sol_diff < 0:
+                                                                for idx, (pre, post) in enumerate(zip(pre_balances, post_balances)):
+                                                                    if idx != wallet_idx and post - pre > 0:
+                                                                        receiver = account_keys[idx]["pubkey"]
+                                                                        break
+                                                            else:
+                                                                receiver = wallet_address
+                                                                
+                                            # Only check token balances if no SOL transfer was found
+                                            if amount == 0:
+                                                # Quick check for token transfers related to our tracked token
+                                                post_token_balances = meta.get("postTokenBalances", [])
+                                                pre_token_balances = meta.get("preTokenBalances", [])
+                                                
+                                                for pre in pre_token_balances:
+                                                    if pre.get("owner") == wallet_address:
+                                                        for post in post_token_balances:
+                                                            if post.get("owner") == wallet_address and post.get("mint") == pre.get("mint"):
+                                                                pre_amount = float(pre.get("uiTokenAmount", {}).get("uiAmount", 0) or 0)
+                                                                post_amount = float(post.get("uiTokenAmount", {}).get("uiAmount", 0) or 0)
+                                                                diff = post_amount - pre_amount
+                                                                
+                                                                if abs(diff) > 0:
+                                                                    amount = abs(diff)
+                                                                    currency = post.get("mint", "Unknown Token")
+                                                                    receiver = wallet_address if diff > 0 else "Unknown"
                                                                     break
                                             
-                                            # If still no amount, check instructions
-                                            if not sol_transfer:
-                                                # Look for transfers in instructions and inner instructions
-                                                instructions = tx_result.get("transaction", {}).get("message", {}).get("instructions", [])
-                                                inner_instructions = tx_result.get("meta", {}).get("innerInstructions", [])
-                                                
-                                                # Process regular instructions
-                                                for instruction in instructions:
-                                                    if "parsed" in instruction and instruction["parsed"].get("type") == "transfer":
-                                                        info = instruction["parsed"]["info"]
-                                                        if info.get("source") == wallet_address or info.get("destination") == wallet_address:
-                                                            try:
-                                                                amount = float(info.get("amount", 0)) / 1_000_000_000  # Convert from lamports to SOL
-                                                                currency = "SOL"
-                                                                receiver = info.get("destination")
-                                                            except ValueError:
-                                                                pass
-                                                
-                                                # Process inner instructions
-                                                for inner in inner_instructions:
-                                                    for instruction in inner.get("instructions", []):
-                                                        if "parsed" in instruction and instruction["parsed"].get("type") == "transfer":
-                                                            info = instruction["parsed"]["info"]
-                                                            if info.get("source") == wallet_address or info.get("destination") == wallet_address:
-                                                                try:
-                                                                    if "amount" in info:  # SOL transfer
-                                                                        amount = float(info.get("amount", 0)) / 1_000_000_000
-                                                                        currency = "SOL"
-                                                                    elif "tokenAmount" in info:  # Token transfer
-                                                                        amount = float(info.get("tokenAmount", {}).get("uiAmount", 0) or 0)
-                                                                        currency = info.get("mint", "Unknown Token")
-                                                                    
-                                                                    receiver = info.get("destination")
-                                                                except ValueError:
-                                                                    pass
-                                        
-                                        # Determine if this was a receive or send for the wallet
-                                        tx_type = "receive" if receiver == wallet_address else "send"
-                                        
-                                        if amount > 0:  # Only add if we found a transfer amount
-                                            tx = {
-                                                'hash': signature,
-                                                'timestamp': timestamp,
-                                                'currency': currency[:5] if len(currency) > 5 and currency != "SOL" else currency,
-                                                'amount': amount,
-                                                'receiver': receiver,
-                                                'value_usd': 0,  # Would need price data
-                                                'block_height': tx_result.get("slot", 0),
-                                                'tx_type': tx_type
-                                            }
-                                            transactions.append(tx)
+                                            # Create transaction record if we found any transfer
+                                            if amount > 0:
+                                                tx_type = "receive" if receiver == wallet_address else "send"
+                                                tx = {
+                                                    'hash': signature,
+                                                    'timestamp': timestamp,
+                                                    'currency': currency[:5] if len(currency) > 5 and currency != "SOL" else currency,
+                                                    'amount': amount,
+                                                    'receiver': receiver,
+                                                    'value_usd': 0,
+                                                    'block_height': tx_result.get("slot", 0),
+                                                    'tx_type': tx_type
+                                                }
+                                                transactions.append(tx)
+                            except asyncio.TimeoutError:
+                                st.warning(f"Transaction {signature} timed out. Skipping.")
+                                continue
+                            except Exception as e:
+                                st.warning(f"Error processing transaction {signature}: {e}")
+                                continue
+            
+            # If we couldn't find any transactions, return a placeholder
+            if not transactions:
+                # Return a placeholder to show something
+                return [{
+                    'hash': 'placeholder',
+                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'currency': 'No recent activity',
+                    'amount': 0,
+                    'receiver': wallet_address,
+                    'value_usd': 0,
+                    'block_height': 0,
+                    'tx_type': 'info'
+                }]
+                
             return transactions
+    except asyncio.TimeoutError:
+        st.warning(f"Request for wallet {wallet_address} transactions timed out.")
+        return [{
+            'hash': 'timeout',
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'currency': 'Request timed out',
+            'amount': 0,
+            'receiver': wallet_address,
+            'value_usd': 0,
+            'block_height': 0,
+            'tx_type': 'error'
+        }]
     except Exception as e:
         st.error(f"Error fetching wallet data: {e}")
-        return []
+        return [{
+            'hash': 'error',
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'currency': 'Error loading data',
+            'amount': 0,
+            'receiver': wallet_address,
+            'value_usd': 0,
+            'block_height': 0,
+            'tx_type': 'error'
+        }]
 
 async def get_wallet_transactions_with_prices(wallet_address: str, token_mint: str = None):
     """Get wallet transactions and enrich with price data"""
