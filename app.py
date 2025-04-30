@@ -3,7 +3,6 @@ import streamlit as st
 import pandas as pd
 import threading
 import aiohttp
-import solana
 from datetime import datetime, timedelta
 
 # Configuration
@@ -146,14 +145,65 @@ async def get_pumpfun_token_transactions(token_mint: str):
                                             amount = 0
                                             
                                             # Try to extract transfer info from instructions
-                                            instructions = tx_result.get("meta", {}).get("innerInstructions", [])
-                                            if instructions:
-                                                for inner in instructions:
-                                                    for instruction in inner.get("instructions", []):
-                                                        if "parsed" in instruction and instruction["parsed"].get("type") == "transfer":
-                                                            info = instruction["parsed"]["info"]
-                                                            amount = float(info.get("amount", 0))
-                                                            receiver = info.get("destination")
+                                            meta = tx_result.get("meta", {})
+                                            post_balances = meta.get("postBalances", [])
+                                            pre_balances = meta.get("preBalances", [])
+                                            
+                                            # Check for token balance changes
+                                            post_token_balances = meta.get("postTokenBalances", [])
+                                            pre_token_balances = meta.get("preTokenBalances", [])
+                                            
+                                            # If we have token balances, try to calculate the amount transferred
+                                            if post_token_balances and pre_token_balances:
+                                                # Group by owner
+                                                by_owner = {}
+                                                
+                                                # Process pre balances
+                                                for balance in pre_token_balances:
+                                                    if balance.get("mint") == token_mint:
+                                                        owner = balance.get("owner", "Unknown")
+                                                        ui_amount = float(balance.get("uiTokenAmount", {}).get("uiAmount", 0) or 0)
+                                                        by_owner[owner] = {"pre": ui_amount, "post": 0}
+                                                
+                                                # Process post balances
+                                                for balance in post_token_balances:
+                                                    if balance.get("mint") == token_mint:
+                                                        owner = balance.get("owner", "Unknown")
+                                                        ui_amount = float(balance.get("uiTokenAmount", {}).get("uiAmount", 0) or 0)
+                                                        if owner in by_owner:
+                                                            by_owner[owner]["post"] = ui_amount
+                                                        else:
+                                                            by_owner[owner] = {"pre": 0, "post": ui_amount}
+                                                
+                                                # Find significant balance changes
+                                                for owner, balances in by_owner.items():
+                                                    diff = balances["post"] - balances["pre"]
+                                                    if diff > 0:  # This owner received tokens
+                                                        receiver = owner
+                                                        amount = abs(diff)
+                                                    elif diff < 0:  # This owner sent tokens
+                                                        sender = owner
+                                                        amount = abs(diff)
+                                            
+                                            # Process instructions to find transfers
+                                            if amount == 0:
+                                                instructions = tx_result.get("meta", {}).get("innerInstructions", [])
+                                                if instructions:
+                                                    for inner in instructions:
+                                                        for instruction in inner.get("instructions", []):
+                                                            if "parsed" in instruction and instruction["parsed"].get("type") == "transfer":
+                                                                info = instruction["parsed"]["info"]
+                                                                if "amount" in info:
+                                                                    # For regular SOL transfers
+                                                                    try:
+                                                                        amount = float(info.get("amount", 0)) / 1_000_000_000  # Convert from lamports to SOL
+                                                                    except ValueError:
+                                                                        amount = 0
+                                                                elif "tokenAmount" in info:
+                                                                    # For SPL token transfers
+                                                                    amount = float(info.get("tokenAmount", {}).get("uiAmount", 0) or 0)
+                                                                
+                                                                receiver = info.get("destination") or receiver
                                             
                                             # Process PumpFun-specific instructions if applicable
                                             is_pump_tx = PUMPFUN_PROGRAM_ID in [acc["pubkey"] for acc in account_keys] if account_keys else False
@@ -231,7 +281,7 @@ async def get_token_holders(token_mint: str):
                                                 holders.append({
                                                     "address": owner,
                                                     "amount": amount,
-                                                    "value_usd": 0  # Would need price data to calculate
+                                                    "value_usd": 0  # Will be enriched with price data
                                                 })
                                         except Exception as e:
                                             st.error(f"Error processing account {account['address']}: {e}")
@@ -291,37 +341,228 @@ async def get_wallet_solana_transactions(wallet_address: str):
                                         amount = 0
                                         receiver = "Unknown"
                                         
-                                        # Look for token transfers in the transaction
-                                        try:
-                                            for instruction in tx_result.get("meta", {}).get("innerInstructions", []):
-                                                for inner in instruction.get("instructions", []):
-                                                    if "parsed" in inner and inner["parsed"].get("type") == "transfer":
-                                                        info = inner["parsed"]["info"]
-                                                        amount = float(info.get("amount", 0))
-                                                        receiver = info.get("destination", "Unknown")
-                                        except:
-                                            pass
+                                        # Check for token balance changes
+                                        meta = tx_result.get("meta", {})
+                                        post_token_balances = meta.get("postTokenBalances", [])
+                                        pre_token_balances = meta.get("preTokenBalances", [])
                                         
-                                        tx = {
-                                            'hash': signature,
-                                            'timestamp': timestamp,
-                                            'currency': currency,
-                                            'amount': amount,
-                                            'receiver': receiver,
-                                            'value_usd': 0,  # Would need price data
-                                            'block_height': tx_result.get("slot", 0)
-                                        }
-                                        transactions.append(tx)
+                                        # If we have token balances, try to calculate the amount transferred
+                                        if post_token_balances or pre_token_balances:
+                                            # Group by owner and mint
+                                            by_token_owner = {}
+                                            
+                                            # Process pre balances
+                                            for balance in pre_token_balances:
+                                                mint = balance.get("mint")
+                                                owner = balance.get("owner", "Unknown")
+                                                ui_amount = float(balance.get("uiTokenAmount", {}).get("uiAmount", 0) or 0)
+                                                
+                                                key = f"{mint}:{owner}"
+                                                by_token_owner[key] = {"mint": mint, "owner": owner, "pre": ui_amount, "post": 0}
+                                            
+                                            # Process post balances
+                                            for balance in post_token_balances:
+                                                mint = balance.get("mint")
+                                                owner = balance.get("owner", "Unknown")
+                                                ui_amount = float(balance.get("uiTokenAmount", {}).get("uiAmount", 0) or 0)
+                                                
+                                                key = f"{mint}:{owner}"
+                                                if key in by_token_owner:
+                                                    by_token_owner[key]["post"] = ui_amount
+                                                else:
+                                                    by_token_owner[key] = {"mint": mint, "owner": owner, "pre": 0, "post": ui_amount}
+                                            
+                                            # Find significant balance changes
+                                            for key, token_data in by_token_owner.items():
+                                                diff = token_data["post"] - token_data["pre"]
+                                                
+                                                # If this wallet's balance decreased
+                                                if token_data["owner"] == wallet_address and diff < 0:
+                                                    amount = abs(diff)
+                                                    currency = token_data["mint"]
+                                                    
+                                                    # Try to find the receiver
+                                                    for other_key, other_data in by_token_owner.items():
+                                                        if other_data["mint"] == currency and other_data["owner"] != wallet_address and other_data["post"] - other_data["pre"] > 0:
+                                                            receiver = other_data["owner"]
+                                                            break
+                                                
+                                                # If this wallet's balance increased
+                                                elif token_data["owner"] == wallet_address and diff > 0:
+                                                    amount = abs(diff)
+                                                    currency = token_data["mint"]
+                                                    
+                                                    # Try to find the sender
+                                                    for other_key, other_data in by_token_owner.items():
+                                                        if other_data["mint"] == currency and other_data["owner"] != wallet_address and other_data["pre"] - other_data["post"] > 0:
+                                                            # This is a receive transaction
+                                                            receiver = wallet_address  # The current wallet is the receiver
+                                                            break
+                                        
+                                        # If no token balance changes, check for SOL transfers
+                                        if amount == 0:
+                                            sol_transfer = False
+                                            
+                                            # Check post and pre balances for SOL transfers
+                                            post_balances = meta.get("postBalances", [])
+                                            pre_balances = meta.get("preBalances", [])
+                                            
+                                            if post_balances and pre_balances:
+                                                # Get transaction message and account keys
+                                                tx_message = tx_result.get("transaction", {}).get("message", {})
+                                                account_keys = tx_message.get("accountKeys", [])
+                                                
+                                                if account_keys:
+                                                    # Find wallet index in account keys
+                                                    wallet_idx = -1
+                                                    for idx, acc in enumerate(account_keys):
+                                                        if acc.get("pubkey") == wallet_address:
+                                                            wallet_idx = idx
+                                                            break
+                                                    
+                                                    if wallet_idx >= 0 and wallet_idx < len(pre_balances) and wallet_idx < len(post_balances):
+                                                        sol_diff = (post_balances[wallet_idx] - pre_balances[wallet_idx]) / 1_000_000_000  # lamports to SOL
+                                                        
+                                                        if sol_diff < 0:  # Sent SOL
+                                                            amount = abs(sol_diff)
+                                                            currency = "SOL"
+                                                            sol_transfer = True
+                                                            
+                                                            # Try to find receiver
+                                                            for idx, (pre, post) in enumerate(zip(pre_balances, post_balances)):
+                                                                if idx != wallet_idx and post - pre > 0:
+                                                                    receiver = account_keys[idx]["pubkey"]
+                                                                    break
+                                                        elif sol_diff > 0:  # Received SOL
+                                                            amount = abs(sol_diff)
+                                                            currency = "SOL"
+                                                            receiver = wallet_address  # The current wallet is the receiver
+                                                            sol_transfer = True
+                                                            
+                                                            # Try to find sender
+                                                            for idx, (pre, post) in enumerate(zip(pre_balances, post_balances)):
+                                                                if idx != wallet_idx and post - pre < 0:
+                                                                    # This would be the sender but we don't need it in this view
+                                                                    break
+                                            
+                                            # If still no amount, check instructions
+                                            if not sol_transfer:
+                                                # Look for transfers in instructions and inner instructions
+                                                instructions = tx_result.get("transaction", {}).get("message", {}).get("instructions", [])
+                                                inner_instructions = tx_result.get("meta", {}).get("innerInstructions", [])
+                                                
+                                                # Process regular instructions
+                                                for instruction in instructions:
+                                                    if "parsed" in instruction and instruction["parsed"].get("type") == "transfer":
+                                                        info = instruction["parsed"]["info"]
+                                                        if info.get("source") == wallet_address or info.get("destination") == wallet_address:
+                                                            try:
+                                                                amount = float(info.get("amount", 0)) / 1_000_000_000  # Convert from lamports to SOL
+                                                                currency = "SOL"
+                                                                receiver = info.get("destination")
+                                                            except ValueError:
+                                                                pass
+                                                
+                                                # Process inner instructions
+                                                for inner in inner_instructions:
+                                                    for instruction in inner.get("instructions", []):
+                                                        if "parsed" in instruction and instruction["parsed"].get("type") == "transfer":
+                                                            info = instruction["parsed"]["info"]
+                                                            if info.get("source") == wallet_address or info.get("destination") == wallet_address:
+                                                                try:
+                                                                    if "amount" in info:  # SOL transfer
+                                                                        amount = float(info.get("amount", 0)) / 1_000_000_000
+                                                                        currency = "SOL"
+                                                                    elif "tokenAmount" in info:  # Token transfer
+                                                                        amount = float(info.get("tokenAmount", {}).get("uiAmount", 0) or 0)
+                                                                        currency = info.get("mint", "Unknown Token")
+                                                                    
+                                                                    receiver = info.get("destination")
+                                                                except ValueError:
+                                                                    pass
+                                        
+                                        # Determine if this was a receive or send for the wallet
+                                        tx_type = "receive" if receiver == wallet_address else "send"
+                                        
+                                        if amount > 0:  # Only add if we found a transfer amount
+                                            tx = {
+                                                'hash': signature,
+                                                'timestamp': timestamp,
+                                                'currency': currency[:5] if len(currency) > 5 and currency != "SOL" else currency,
+                                                'amount': amount,
+                                                'receiver': receiver,
+                                                'value_usd': 0,  # Would need price data
+                                                'block_height': tx_result.get("slot", 0),
+                                                'tx_type': tx_type
+                                            }
+                                            transactions.append(tx)
             return transactions
     except Exception as e:
         st.error(f"Error fetching wallet data: {e}")
         return []
+
+async def get_wallet_transactions_with_prices(wallet_address: str, token_mint: str = None):
+    """Get wallet transactions and enrich with price data"""
+    transactions = await get_wallet_solana_transactions(wallet_address)
+    
+    # Get price data for the tokens in these transactions
+    prices = {}
+    
+    # For our tracked token, use the price from our main function
+    if token_mint:
+        token_price = await get_token_price(token_mint)
+        prices[token_mint] = token_price
+    
+    # For SOL, we can get a more accurate price
+    try:
+        # Simple placeholder - in a real implementation, fetch from CoinGecko or similar
+        prices["SOL"] = 78.50  # Example SOL price in USD
+    except Exception:
+        prices["SOL"] = 0
+    
+    # Enrich transactions with price data
+    for tx in transactions:
+        currency = tx.get('currency')
+        if currency == "SOL" and "SOL" in prices:
+            tx['value_usd'] = tx.get('amount', 0) * prices["SOL"]
+        elif currency in prices:
+            tx['value_usd'] = tx.get('amount', 0) * prices[currency]
+        elif token_mint and len(currency) > 10:  # This might be a token mint address
+            tx['value_usd'] = tx.get('amount', 0) * prices.get(token_mint, 0)
+    
+    return transactions
+
+async def get_token_price(token_mint: str):
+    """Get token price data from CoinGecko or similar API"""
+    # For demonstration purposes, we'll use a placeholder
+    # In a real implementation, you would integrate with CoinGecko, CoinMarketCap, or Jupiter API
+    try:
+        # This would be a real API call in production
+        return 0.01  # Placeholder price in USD
+    except Exception as e:
+        st.error(f"Error fetching price data: {e}")
+        return 0
+
+async def enrich_token_data(transactions, holders, token_price):
+    """Add price and value data to transactions and holders"""
+    # Enrich transaction data with price and value
+    for tx in transactions:
+        tx['price'] = token_price
+        tx['value'] = tx['amount'] * token_price
+    
+    # Enrich holder data with value in USD
+    for holder in holders:
+        holder['value_usd'] = holder['amount'] * token_price
+    
+    return transactions, holders
 
 async def process_solana_data(token_mint: str):
     """Process Solana data into a format compatible with our app"""
     token_info = await get_solana_token_info(token_mint)
     trades = await get_pumpfun_token_transactions(token_mint)
     holders = await get_token_holders(token_mint)
+    token_price = await get_token_price(token_mint)
+    trades, holders = await enrich_token_data(trades, holders, token_price)
     
     return trades, holders, token_info
 
@@ -468,18 +709,29 @@ with tab1:
             st.subheader("Token Holders")
             
             try:
-                _, holders, _ = run_async(process_solana_data(st.session_state.tracked_token))
+                # Get token price for value calculations
+                token_price = run_async(get_token_price(st.session_state.tracked_token))
+                
+                # Get fresh holder data
+                holders = run_async(get_token_holders(st.session_state.tracked_token))
+                
+                # Enrich holder data with token price
+                for holder in holders:
+                    holder['value_usd'] = holder['amount'] * token_price
                 
                 if holders:
                     st.metric("Total Holders", len(holders))
                     
-                    df_holders = pd.DataFrame(holders[:10])
+                    # Sort holders by amount (largest first)
+                    sorted_holders = sorted(holders, key=lambda x: x['amount'], reverse=True)
+                    
+                    df_holders = pd.DataFrame(sorted_holders[:10])
                     df_holders['Wallet'] = df_holders['address'].apply(
                         lambda x: f"{x[:4]}...{x[-4:]}" if isinstance(x, str) else x
                     )
                     
                     df_holders['Formatted Amount'] = df_holders['amount'].apply(
-                        lambda x: f"{x:,.2f}" if x >= 1 else f"{x:,.6f}"
+                        lambda x: f"{x:,.2f}" if x >= 1 else f"{x:,.8f}"
                     )
                     
                     df_holders['Value USD'] = df_holders['value_usd'].apply(
@@ -519,7 +771,7 @@ with tab2:
             
             if selected_wallet:
                 try:
-                    transactions = run_async(get_wallet_solana_transactions(selected_wallet))
+                    transactions = run_async(get_wallet_transactions_with_prices(selected_wallet, st.session_state.tracked_token))
                     st.session_state.wallet_history[selected_wallet] = transactions
                     
                     st.subheader(f"Wallet: {selected_wallet[:6]}...{selected_wallet[-4:]}" if isinstance(selected_wallet, str) and len(selected_wallet) > 10 else selected_wallet)
