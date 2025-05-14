@@ -7,7 +7,9 @@ from datetime import datetime, timedelta
 
 # Configuration
 # Solana Configuration
-SOLANA_RPC_ENDPOINT = "https://api.mainnet-beta.solana.com"
+from blockchair import BLOCKCHAIR_API_KEY, BLOCKCHAIR_API_BASE, SOLANA_RPC_ENDPOINT
+from blockchair import call_solana_rpc, call_blockchair_api
+from blockchair import get_account_info, get_signatures_for_address, get_transaction, get_token_largest_accounts
 PUMPFUN_PROGRAM_ID = "PFUNzK5Ej2iLfBiuYCGDPHih1ZJUzPCCoHn9CiwYtWK"  # PumpFun Program ID
 
 # Initialize session state
@@ -41,6 +43,62 @@ def run_async(coro):
     finally:
         loop.close()
 
+async def call_blockchair_api(endpoint, params=None):
+    """Call the Blockchair API with the given endpoint and parameters"""
+    try:
+        url = f"{BLOCKCHAIR_API_BASE}/{endpoint}"
+        if params is None:
+            params = {}
+        
+        # Add API key to parameters
+        params['key'] = BLOCKCHAIR_API_KEY
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    st.error(f"Blockchair API error: {response.status}")
+                    return None
+    except Exception as e:
+        st.error(f"Error calling Blockchair API: {e}")
+        return None
+
+async def call_solana_rpc(method, params):
+    """Call Solana RPC API (either via Blockchair or direct fallback)"""
+    try:
+        # First try through Blockchair's RPC endpoint
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params
+        }
+        
+        # Try Blockchair first
+        endpoint = "rpc"
+        blockchair_url = f"{BLOCKCHAIR_API_BASE}/{endpoint}"
+        
+        async with aiohttp.ClientSession() as session:
+            # Add API key to query params instead of URL path
+            async with session.post(blockchair_url, params={"key": BLOCKCHAIR_API_KEY}, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if "error" not in data:
+                        return data
+                
+                # If Blockchair fails, fallback to direct Solana RPC
+                st.warning(f"Falling back to direct Solana RPC for method: {method}")
+                async with session.post(SOLANA_RPC_ENDPOINT, json=payload) as fallback_response:
+                    if fallback_response.status == 200:
+                        return await fallback_response.json()
+                    else:
+                        st.error(f"Solana RPC error: {fallback_response.status}")
+                        return None
+    except Exception as e:
+        st.error(f"Error calling RPC: {e}")
+        return None
+
 def start_monitoring_thread(token_mint: str):
     """Start monitoring in a separate thread"""
     def monitor_wrapper():
@@ -57,33 +115,35 @@ def start_monitoring_thread(token_mint: str):
 async def get_solana_token_info(token_mint: str):
     """Get token metadata from Solana RPC API"""
     try:
-        async with aiohttp.ClientSession() as session:
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getAccountInfo",
-                "params": [
-                    token_mint,
-                    {"encoding": "jsonParsed"}
-                ]
+        # Using our blockchair helper function
+        data = await get_account_info(token_mint)
+        
+        if data and "result" in data and data["result"] and "value" in data["result"]:
+            account_data = data["result"]["value"]
+            if "data" in account_data and "parsed" in account_data["data"]:
+                info = account_data["data"]["parsed"]["info"]
+                token_info = {
+                    "symbol": info.get("symbol", "Unknown"),
+                    "name": info.get("name", "Unknown"),
+                    "contract": token_mint,
+                    "decimals": info.get("decimals", 9),
+                    "supply": info.get("supply", "0")
+                }
+                return token_info
+                
+        # Try using Blockchair specific endpoints if available
+        token_data = await call_blockchair_api(f"dashboards/token/{token_mint}")
+        if token_data and "data" in token_data and token_mint in token_data["data"]:
+            token_info = token_data["data"][token_mint]
+            return {
+                "symbol": token_info.get("symbol", "Unknown"),
+                "name": token_info.get("name", "Unknown"),
+                "contract": token_mint,
+                "decimals": token_info.get("decimals", 9),
+                "supply": token_info.get("supply", "0")
             }
             
-            async with session.post(SOLANA_RPC_ENDPOINT, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if "result" in data and data["result"] and "value" in data["result"]:
-                        account_data = data["result"]["value"]
-                        if "data" in account_data and "parsed" in account_data["data"]:
-                            info = account_data["data"]["parsed"]["info"]
-                            token_info = {
-                                "symbol": info.get("symbol", "Unknown"),
-                                "name": info.get("name", "Unknown"),
-                                "contract": token_mint,
-                                "decimals": info.get("decimals", 9),
-                                "supply": info.get("supply", "0")
-                            }
-                            return token_info
-                return {"symbol": "Unknown", "name": "Unknown", "contract": token_mint, "decimals": 9, "supply": "0"}
+        return {"symbol": "Unknown", "name": "Unknown", "contract": token_mint, "decimals": 9, "supply": "0"}
     except Exception as e:
         st.error(f"Error fetching token info: {e}")
         return {"symbol": "Unknown", "name": "Unknown", "contract": token_mint, "decimals": 9, "supply": "0"}
@@ -91,22 +151,48 @@ async def get_solana_token_info(token_mint: str):
 async def get_pumpfun_token_transactions(token_mint: str):
     """Get token transactions from Solana RPC using signatures for address"""
     try:
-        async with aiohttp.ClientSession() as session:
-            # First get recent signatures for the token mint address
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getSignaturesForAddress",
-                "params": [
-                    token_mint,
-                    {"limit": 50}
-                ]
-            }
+        # Using our blockchair helper function for signature lookup
+        transactions = []
+        
+        # Try BlockChair specific API first
+        token_txs = await call_blockchair_api(f"dashboards/token/{token_mint}/transactions", {"limit": 50})
+        if token_txs and "data" in token_txs and token_mint in token_txs["data"]:
+            # Process BlockChair specific transaction format
+            pass  # Would implement Blockchair-specific format handling here
+        
+        # If BlockChair specific endpoint doesn't work or we need more data, use RPC
+        data = await get_signatures_for_address(token_mint, 50)
+        
+        if data and "result" in data and data["result"]:
+            signatures = [item["signature"] for item in data["result"]]
             
-            transactions = []
-            async with session.post(SOLANA_RPC_ENDPOINT, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
+            # Get transaction details for each signature
+            for signature in signatures:
+                tx_data = await get_transaction(signature)
+                
+                if tx_data and "result" in tx_data and tx_data["result"]:
+                    try:
+                        tx_result = tx_data["result"]
+                        block_time = tx_result.get("blockTime", 0)
+                        timestamp = datetime.fromtimestamp(block_time).strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        # Get transaction message and account keys
+                        tx_message = tx_result.get("transaction", {}).get("message", {})
+                        account_keys = tx_message.get("accountKeys", [])
+                        
+                        # Extract relevant information
+                        sender = account_keys[0]["pubkey"] if account_keys else "Unknown"
+                        receiver = None
+                        amount = 0
+                        
+                        # Try to extract transfer info from instructions
+                        meta = tx_result.get("meta", {})
+                        post_balances = meta.get("postBalances", [])
+                        pre_balances = meta.get("preBalances", [])
+                        
+                        # Check for token balance changes
+                        post_token_balances = meta.get("postTokenBalances", [])
+                        pre_token_balances = meta.get("preTokenBalances", [])
                     if "result" in data and data["result"]:
                         signatures = [item["signature"] for item in data["result"]]
                         
@@ -259,11 +345,9 @@ async def get_token_holders(token_mint: str):
                     "params": [token_mint]
                 }
                 
-                holders = []
-                try:
-                    async with session.post(SOLANA_RPC_ENDPOINT, json=payload, timeout=timeout) as response:
-                        if response.status == 200:
-                            data = await response.json()
+                holders = []                try:
+                    # Using our helper function for token holders
+                    data = await get_token_largest_accounts(token_mint)
                             
                             # Check for errors in response
                             if "error" in data:
@@ -290,11 +374,9 @@ async def get_token_holders(token_mint: str):
                                             {"encoding": "jsonParsed"}
                                         ]
                                     }
-                                    
-                                    try:
-                                        async with session.post(SOLANA_RPC_ENDPOINT, json=acc_payload, timeout=timeout) as acc_response:
-                                            if acc_response.status == 200:
-                                                acc_data = await acc_response.json()
+                                      try:
+                                        # Using our helper function for account info
+                                        acc_data = await get_account_info(account_address)
                                                 
                                                 if "error" in acc_data:
                                                     return None
@@ -388,30 +470,17 @@ async def get_wallet_solana_transactions(wallet_address: str):
                     {"limit": 10}  # Reduced from 20 to 10 for faster loading
                 ]
             }
+              transactions = []
             
-            transactions = []
-            async with session.post(SOLANA_RPC_ENDPOINT, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if "result" in data and data["result"]:
-                        signatures = [item["signature"] for item in data["result"]]
-                        
-                        # Process signatures in smaller batches for better responsiveness
-                        for signature in signatures[:5]:  # Only process the 5 most recent transactions initially
-                            tx_payload = {
-                                "jsonrpc": "2.0",
-                                "id": 1,
-                                "method": "getTransaction",
-                                "params": [
-                                    signature,
-                                    {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
-                                ]
-                            }
-                            
-                            try:
-                                async with session.post(SOLANA_RPC_ENDPOINT, json=tx_payload) as tx_response:
-                                    if tx_response.status == 200:
-                                        tx_data = await tx_response.json()
+            # Using our helper function for wallet transactions
+            data = await get_signatures_for_address(wallet_address, 10)
+            if "result" in data and data["result"]:
+                signatures = [item["signature"] for item in data["result"]]
+                
+                # Process signatures in smaller batches for better responsiveness
+                for signature in signatures[:5]:  # Only process the 5 most recent transactions initially
+                    try:
+                        tx_data = await get_transaction(signature)
                                         if "result" in tx_data and tx_data["result"]:
                                             tx_result = tx_data["result"]
                                             
@@ -684,14 +753,24 @@ with st.sidebar:
             st.session_state.monitor_thread = None
             st.session_state.last_update = None
             st.info("Stopped tracking")
-            
-    # Add PumpFun specific options
+              # Add PumpFun specific options
     st.header("PumpFun Options")
     st.checkbox("Track PumpFun Events Only", value=True, 
                 help="When checked, only show transactions related to the PumpFun protocol")
+      st.markdown("---")
+    st.caption(f"Using Blockchair Solana API (Key: {BLOCKCHAIR_API_KEY[:5]}...)")
     
-    st.markdown("---")
-    st.caption("Using Solana Foundation RPC")
+    # Test Blockchair API connection
+    if st.button("Test API Connection"):
+        with st.spinner("Testing Blockchair API connection..."):
+            from blockchair import test_blockchair_connection
+            success, message = run_async(test_blockchair_connection())
+            if success:
+                st.success(message)
+            else:
+                st.error(message)
+    
+    st.info("Blockchair API provides enhanced Solana transaction tracking with faster response times and improved reliability.")
 
 # Main content tabs
 tab1, tab2, tab3 = st.tabs(["Token Overview", "Wallet Activity", "Transaction History"])
